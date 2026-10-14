@@ -1,0 +1,18 @@
+{
+  "short_name": "Famola",
+  "name": "Famola excel ninja",
+  "description": "Enterprise Purchase Order Excel Parser, Customer Series Books, 3-Way Reconciliation, Partial Invoicing, Auto Report Generator & Cloud DB System",
+  "start_url": "/",
+  "display": "standalone",
+  "display_override": ["window-controls-overlay", "standalone", "fullscreen"],
+  "orientation": "any",
+  "background_color": "#0b132b",
+  "theme_color": "#0f172a",
+  "icons": [
+    {
+      "src": "/favicon.ico",
+      "sizes": "64x64 32x32 24x24 16x16",
+      "type": "image/x-icon"
+    }
+  ]
+}
