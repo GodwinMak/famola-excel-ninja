@@ -24,6 +24,7 @@ import {
   groupPOsByNumber
 } from '../utils/storage';
 import { allocateSeriesNumber } from '../utils/seriesService';
+import { deleteServerDeliveryNoteLine } from '../utils/databaseService';
 import * as XLSX from 'xlsx';
 import { generateSampleDeliveryNoteExcelTemplate } from '../utils/excelParser';
 import { exportTableToExcel, exportTableToPdf } from '../utils/tableExport';
@@ -382,7 +383,7 @@ export const DeliveryNotesManager: React.FC<DeliveryNotesManagerProps> = ({
     if (!linePendingDelete || !onSaveDeliveryNote) return;
     const { deliveryNote, lineIndex, source } = linePendingDelete;
     const updatedLines = [...(deliveryNote.lines || [])];
-    updatedLines.splice(lineIndex, 1);
+    const [deletedItem] = updatedLines.splice(lineIndex, 1);
 
     const totalDeliveredQuantity = updatedLines.reduce(
       (acc, l) => acc + (Number(l.deliveredQuantity) || 0),
@@ -403,6 +404,10 @@ export const DeliveryNotesManager: React.FC<DeliveryNotesManagerProps> = ({
     };
 
     onSaveDeliveryNote(updatedRecord);
+
+    if (deletedItem?.id || deletedItem?.poLineId) {
+      deleteServerDeliveryNoteLine(deliveryNote.id, deletedItem.id || deletedItem.poLineId);
+    }
 
     if (source === 'modal' && editingDNModal && editingDNModal.id === deliveryNote.id) {
       setEditingDNModal(updatedRecord);
@@ -1115,16 +1120,7 @@ export const DeliveryNotesManager: React.FC<DeliveryNotesManagerProps> = ({
   // Delete Customer Delivery Book Settings
   const handleDeleteCustomerBook = () => {
     const cust = selectedPoGroup?.customerName || (selectedCustomer !== 'ALL' ? selectedCustomer : 'General Customer');
-    if (!window.confirm(`Are you sure you want to delete the series book for "${cust}"? Numbering will revert to default series.`)) {
-      return;
-    }
-    deleteCustomerSeriesBook(cust);
-    setActiveCustomerBook(null);
-    const cfg = loadStoredSeriesConfig();
-    const defaultDn = formatSeriesNumber(cfg.deliverySeries.prefix, cfg.deliverySeries.currentNumber, cfg.deliverySeries.padding);
-    setDnNumber(defaultDn);
-    setIsBookModalOpen(false);
-    if (onSeriesConfigChanged) onSeriesConfigChanged();
+    setCustomerBookPendingDelete(cust);
   };
 
   // Toggle select all lines
@@ -1787,6 +1783,7 @@ export const DeliveryNotesManager: React.FC<DeliveryNotesManagerProps> = ({
 
   // Admin permanent delete confirmation state for Delivery Note
   const [dnPendingDelete, setDnPendingDelete] = useState<DeliveryNoteRecord | null>(null);
+  const [customerBookPendingDelete, setCustomerBookPendingDelete] = useState<string | null>(null);
 
   // Filtered Delivery Notes Database
   const filteredDatabaseDNs = useMemo(() => {
@@ -3753,6 +3750,28 @@ export const DeliveryNotesManager: React.FC<DeliveryNotesManagerProps> = ({
           0
         )}
         details="Permanently removes delivery note from database. Delivered quantities will be returned back to dispatch balance. Any matched invoice links will be released."
+      />
+
+      {/* Permanent Delete Modal for Customer Series Book */}
+      <PermanentDeleteModal
+        isOpen={!!customerBookPendingDelete}
+        onClose={() => setCustomerBookPendingDelete(null)}
+        onConfirm={() => {
+          if (customerBookPendingDelete) {
+            deleteCustomerSeriesBook(customerBookPendingDelete);
+            setActiveCustomerBook(null);
+            const cfg = loadStoredSeriesConfig();
+            const defaultDn = formatSeriesNumber(cfg.deliverySeries.prefix, cfg.deliverySeries.currentNumber, cfg.deliverySeries.padding);
+            setDnNumber(defaultDn);
+            setIsBookModalOpen(false);
+            if (onSeriesConfigChanged) onSeriesConfigChanged();
+            setCustomerBookPendingDelete(null);
+          }
+        }}
+        transactionType="CUSTOM_SERIES"
+        referenceNumber={customerBookPendingDelete || ''}
+        customerName={customerBookPendingDelete || ''}
+        details={`Deleting series book for "${customerBookPendingDelete}" will revert delivery note numbering for this customer back to the default system series.`}
       />
 
       {/* SMS Confirmation Modal for Deleting Line Item */}

@@ -6,7 +6,8 @@ import {
   PaymentRecord, 
   POLineItem, 
   DashboardMetrics,
-  MatchingItem 
+  MatchingItem,
+  DocumentIssueRecord 
 } from '../types';
 import { formatCurrency, generateMatchingReport } from '../utils/storage';
 import { naturalCompare } from '../utils/naturalSort';
@@ -18,6 +19,7 @@ import {
   GitCompare, 
   TrendingUp, 
   Upload, 
+  Download,
   Plus, 
   FileSpreadsheet, 
   ArrowRight, 
@@ -49,6 +51,7 @@ import { exportTableToExcel, exportTableToPdf } from '../utils/tableExport';
 import { TableExportToolbar } from './TableExportToolbar';
 import { TablePagination } from './TablePagination';
 import { CustomerBookSeriesAudit } from './CustomerBookSeriesAudit';
+import { AIManagementReportModal } from './AIManagementReportModal';
 
 interface DashboardProps {
   metrics: DashboardMetrics;
@@ -57,6 +60,7 @@ interface DashboardProps {
   invoices: InvoiceRecord[];
   deliveryNotes: DeliveryNoteRecord[];
   payments: PaymentRecord[];
+  issues?: DocumentIssueRecord[];
   onNavigate: (tab: any, subFilter?: string) => void;
   onSelectPOForInvoice: (poNumber: string) => void;
   onOpenUploadModal: () => void;
@@ -76,6 +80,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
   invoices,
   deliveryNotes,
   payments,
+  issues = [],
   onNavigate,
   onSelectPOForInvoice,
   onOpenUploadModal,
@@ -83,6 +88,9 @@ export const Dashboard: React.FC<DashboardProps> = ({
   onOpenVoiceSearch,
   onOpenAutoReport,
 }) => {
+  const [isAIManagementReportOpen, setIsAIManagementReportOpen] = useState(false);
+  const [aiManagementReportModule, setAiManagementReportModule] = useState<'INVOICE' | 'DELIVERY' | 'PAYMENT'>('INVOICE');
+
   const [groupingMode, setGroupingMode] = useState<GroupingMode>('PO');
   const [metricMode, setMetricMode] = useState<MetricDisplayMode>('QUANTITY');
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('ALL');
@@ -725,14 +733,26 @@ export const Dashboard: React.FC<DashboardProps> = ({
                 <span>AI Voice Search</span>
               </button>
             )}
+            <button
+              type="button"
+              onClick={() => {
+                setAiManagementReportModule('INVOICE');
+                setIsAIManagementReportOpen(true);
+              }}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white rounded-lg text-xs font-semibold transition-all shadow-sm cursor-pointer group"
+              title="Generate AI Management Report Summary (Invoice, Delivery, Payment & PDF Export)"
+            >
+              <Sparkles className="w-4 h-4 text-purple-200 group-hover:rotate-12 transition-transform" />
+              <span>AI Management Report</span>
+            </button>
             {onOpenAutoReport && (
               <button
                 type="button"
                 onClick={onOpenAutoReport}
-                className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-purple-600 hover:bg-purple-500 text-white rounded-lg text-xs font-semibold transition-all shadow-sm cursor-pointer"
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-slate-800 hover:bg-slate-700 text-white rounded-lg text-xs font-semibold transition-all shadow-sm cursor-pointer"
                 title="Generate AI Automated Reports"
               >
-                <Sparkles className="w-4 h-4 text-purple-200" />
+                <Sparkles className="w-4 h-4 text-purple-300" />
                 <span>AI Auto Reports</span>
               </button>
             )}
@@ -892,6 +912,80 @@ export const Dashboard: React.FC<DashboardProps> = ({
             <span>View Payments Received</span>
             <ArrowRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
           </div>
+        </div>
+      </div>
+
+      {/* =========================================================================
+          AI EXECUTIVE MANAGEMENT REPORT GENERATOR BANNER & QUICK LAUNCH
+          ========================================================================= */}
+      <div className="bg-gradient-to-r from-slate-900 via-indigo-950 to-slate-900 rounded-2xl p-5 text-white border border-slate-800 shadow-md flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+        <div className="flex items-start gap-3.5">
+          <div className="w-10 h-10 rounded-xl bg-purple-500/20 border border-purple-400/30 text-purple-300 flex items-center justify-center shrink-0 shadow-inner">
+            <Sparkles className="w-5 h-5 text-purple-300" />
+          </div>
+          <div>
+            <div className="flex items-center gap-2 flex-wrap">
+              <h3 className="text-base font-bold text-white tracking-tight">
+                AI Executive Management Report Generator
+              </h3>
+              <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-purple-500/20 text-purple-200 border border-purple-400/30">
+                Invoices • Deliveries • Payments
+              </span>
+            </div>
+            <p className="text-xs text-slate-300 mt-1 max-w-2xl">
+              Generate executive summary reports with 50-leaflet books tracking, customer issues status, work performance narrative, customer billing value charts, PO reconciliation, and one-click PDF export.
+            </p>
+          </div>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2 shrink-0">
+          <button
+            type="button"
+            onClick={() => {
+              setAiManagementReportModule('INVOICE');
+              setIsAIManagementReportOpen(true);
+            }}
+            className="px-3.5 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-bold inline-flex items-center gap-1.5 transition-all shadow-xs cursor-pointer"
+          >
+            <FileText className="w-3.5 h-3.5 text-blue-200" />
+            <span>Invoice Report</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              setAiManagementReportModule('DELIVERY');
+              setIsAIManagementReportOpen(true);
+            }}
+            className="px-3.5 py-2 bg-purple-600 hover:bg-purple-500 text-white rounded-xl text-xs font-bold inline-flex items-center gap-1.5 transition-all shadow-xs cursor-pointer"
+          >
+            <Truck className="w-3.5 h-3.5 text-purple-200" />
+            <span>Delivery Report</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              setAiManagementReportModule('PAYMENT');
+              setIsAIManagementReportOpen(true);
+            }}
+            className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold inline-flex items-center gap-1.5 transition-all shadow-xs cursor-pointer"
+          >
+            <CreditCard className="w-3.5 h-3.5 text-emerald-200" />
+            <span>Payment Report</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              setAiManagementReportModule('INVOICE');
+              setIsAIManagementReportOpen(true);
+            }}
+            className="px-3.5 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-xl text-xs font-bold inline-flex items-center gap-1.5 transition-all shadow-xs cursor-pointer"
+          >
+            <Download className="w-3.5 h-3.5 text-slate-300" />
+            <span>Export PDF</span>
+          </button>
         </div>
       </div>
 
@@ -3100,6 +3194,18 @@ export const Dashboard: React.FC<DashboardProps> = ({
           </div>
         </div>
       )}
+
+      {/* AI Management Report Summary Modal */}
+      <AIManagementReportModal
+        isOpen={isAIManagementReportOpen}
+        onClose={() => setIsAIManagementReportOpen(false)}
+        invoices={invoices}
+        deliveryNotes={deliveryNotes}
+        payments={payments}
+        poGroups={poGroups}
+        issues={issues}
+        initialModule={aiManagementReportModule}
+      />
     </div>
   );
 };

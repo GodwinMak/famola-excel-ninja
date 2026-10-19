@@ -657,7 +657,9 @@ export const hydrateFromIndexedDB = async (): Promise<{
       memoryPOs = pos.filter((p) => p && !p.id?.includes('sample'));
     }
     if (Array.isArray(invs) && invs.length > 0) {
-      memoryInvoices = invs.filter((inv) => inv && !inv.id?.includes('sample'));
+      memoryInvoices = invs
+        .filter((inv) => inv && !inv.id?.includes('sample'))
+        .map((inv) => sanitizeInvoiceTotals(inv));
     }
     if (Array.isArray(dns) && dns.length > 0) {
       memoryDNs = dns.filter((dn) => dn && !dn.id?.includes('sample'));
@@ -712,7 +714,107 @@ export const savePOs = (pos: POLineItem[]) => {
   // Always asynchronously persist the full dataset to IndexedDB (virtually unlimited quota)
   idbSet(STORES.PO_LINES, pos).catch(() => {});
   // Safely persist to localStorage with quota overflow protection
-  safeLocalStorageSet(PO_STORAGE_KEY, JSON.stringify(pos));
+  if (pos.length < 150) {
+    safeLocalStorageSet(PO_STORAGE_KEY, JSON.stringify(pos));
+  } else {
+    safeLocalStorageSet(PO_STORAGE_KEY, JSON.stringify({ __idb: true, count: pos.length, updated: Date.now() }));
+  }
+};
+
+export const parseCleanNumber = (val: any): number => {
+  if (typeof val === 'number') return isNaN(val) ? 0 : val;
+  if (!val) return 0;
+  if (typeof val === 'string') {
+    const clean = val.replace(/[^0-9.-]/g, '');
+    const num = parseFloat(clean);
+    return isNaN(num) ? 0 : num;
+  }
+  return 0;
+};
+
+export const sanitizeInvoiceTotals = (inv: InvoiceRecord): InvoiceRecord => {
+  if (!inv) return inv;
+  const lines = Array.isArray(inv.lines) ? inv.lines : [];
+  if (lines.length > 0) {
+    let sub = 0;
+    let vt = 0;
+    const updatedLines = lines.map((l) => {
+      const qty = parseCleanNumber(l.invoicedQuantity ?? (l as any).quantityInvoiced ?? (l as any).billedQuantity ?? (l as any).billQty ?? 0);
+      let price = parseCleanNumber(l.unitPrice ?? 0);
+      const vRate =
+        l.vatRate !== undefined && l.vatRate !== null && Number(l.vatRate) > 0 && Number(l.vatRate) <= 1
+          ? Number(l.vatRate)
+          : 0.18;
+      let valBefore = 0;
+      if (qty > 0 && price > 0) {
+        valBefore = Math.round(qty * price * 100) / 100;
+      } else if (parseCleanNumber(l.valueBeforeVat) > 0) {
+        valBefore = parseCleanNumber(l.valueBeforeVat);
+        if (qty > 0 && price === 0) price = Math.round((valBefore / qty) * 100) / 100;
+      } else if (parseCleanNumber(l.totalBeforeVat) > 0) {
+        valBefore = parseCleanNumber(l.totalBeforeVat);
+        if (qty > 0 && price === 0) price = Math.round((valBefore / qty) * 100) / 100;
+      } else if (parseCleanNumber(l.valueAfterVat) > 0) {
+        valBefore = Math.round((parseCleanNumber(l.valueAfterVat) / (1 + vRate)) * 100) / 100;
+        if (qty > 0 && price === 0) price = Math.round((valBefore / qty) * 100) / 100;
+      } else {
+        valBefore = Math.round(qty * price * 100) / 100;
+      }
+
+      let vatAmt = Math.round(valBefore * vRate * 100) / 100;
+      const explicitVat = parseCleanNumber(l.vatAmount);
+      if (explicitVat > 0 && explicitVat <= valBefore * 0.35) {
+        vatAmt = explicitVat;
+      }
+      const valAfter = Math.round((valBefore + vatAmt) * 100) / 100;
+
+      sub += valBefore;
+      vt += vatAmt;
+
+      return {
+        ...l,
+        invoicedQuantity: qty,
+        unitPrice: price,
+        vatRate: vRate,
+        valueBeforeVat: valBefore,
+        totalBeforeVat: valBefore,
+        vatAmount: vatAmt,
+        valueAfterVat: valAfter,
+        totalAfterVat: valAfter,
+      };
+    });
+
+    sub = Math.round(sub * 100) / 100;
+    vt = Math.round(vt * 100) / 100;
+    const tot = Math.round((sub + vt) * 100) / 100;
+
+    return {
+      ...inv,
+      lines: updatedLines,
+      subtotalBeforeVat: sub,
+      totalVat: vt,
+      totalAfterVat: tot,
+    };
+  } else {
+    let sub = parseCleanNumber(inv.subtotalBeforeVat);
+    let vt = parseCleanNumber(inv.totalVat);
+    let tot = parseCleanNumber(inv.totalAfterVat);
+
+    if (tot > 0 && sub <= 0) {
+      sub = Math.round((tot / 1.18) * 100) / 100;
+      vt = Math.round((tot - sub) * 100) / 100;
+    } else if (sub > 0 && tot <= 0) {
+      vt = Math.round(sub * 0.18 * 100) / 100;
+      tot = Math.round((sub + vt) * 100) / 100;
+    }
+
+    return {
+      ...inv,
+      subtotalBeforeVat: sub,
+      totalVat: vt,
+      totalAfterVat: tot,
+    };
+  }
 };
 
 export const loadStoredInvoices = (): InvoiceRecord[] => {
@@ -724,7 +826,9 @@ export const loadStoredInvoices = (): InvoiceRecord[] => {
     if (raw) {
       const parsed = JSON.parse(raw);
       if (Array.isArray(parsed)) {
-        const clean = parsed.filter((inv) => inv && !inv.id?.includes('sample'));
+        const clean = parsed
+          .filter((inv) => inv && !inv.id?.includes('sample'))
+          .map((inv) => sanitizeInvoiceTotals(inv));
         memoryInvoices = clean;
         return clean;
       }
@@ -738,7 +842,11 @@ export const loadStoredInvoices = (): InvoiceRecord[] => {
 export const saveInvoices = (invoices: InvoiceRecord[]) => {
   memoryInvoices = invoices;
   idbSet(STORES.INVOICES, invoices).catch(() => {});
-  safeLocalStorageSet(INVOICE_STORAGE_KEY, JSON.stringify(invoices));
+  if (invoices.length < 100) {
+    safeLocalStorageSet(INVOICE_STORAGE_KEY, JSON.stringify(invoices));
+  } else {
+    safeLocalStorageSet(INVOICE_STORAGE_KEY, JSON.stringify({ __idb: true, count: invoices.length, updated: Date.now() }));
+  }
 };
 
 export const loadStoredDeliveryNotes = (): DeliveryNoteRecord[] => {
@@ -764,7 +872,11 @@ export const loadStoredDeliveryNotes = (): DeliveryNoteRecord[] => {
 export const saveDeliveryNotes = (dns: DeliveryNoteRecord[]) => {
   memoryDNs = dns;
   idbSet(STORES.DELIVERY_NOTES, dns).catch(() => {});
-  safeLocalStorageSet(DN_STORAGE_KEY, JSON.stringify(dns));
+  if (dns.length < 100) {
+    safeLocalStorageSet(DN_STORAGE_KEY, JSON.stringify(dns));
+  } else {
+    safeLocalStorageSet(DN_STORAGE_KEY, JSON.stringify({ __idb: true, count: dns.length, updated: Date.now() }));
+  }
 };
 
 export const loadStoredPayments = (): PaymentRecord[] => {
@@ -847,24 +959,34 @@ export const resolveDocumentIssue = (
   resolvedBy: string,
   resolutionNotes: string
 ): DocumentIssueRecord[] => {
+  return resolveMultipleDocumentIssues([issueId], resolvedBy, resolutionNotes);
+};
+
+export const resolveMultipleDocumentIssues = (
+  issueIds: string[],
+  resolvedBy: string,
+  resolutionNotes: string
+): DocumentIssueRecord[] => {
   const current = loadStoredIssues();
+  const idSet = new Set(issueIds);
+  const now = new Date().toISOString();
   const updated = current.map((item) => {
-    if (item.id === issueId) {
+    if (idSet.has(item.id)) {
       return {
         ...item,
         status: 'RESOLVED' as const,
         resolvedBy,
-        resolvedAt: new Date().toISOString(),
+        resolvedAt: now,
         resolutionNotes,
-        lineIssues: item.lineIssues.map((l) => ({ ...l, status: 'RESOLVED' as const })),
+        lineIssues: (item.lineIssues || []).map((l) => ({ ...l, status: 'RESOLVED' as const })),
         comments: [
-          ...item.comments,
+          ...(item.comments || []),
           {
-            id: `comm-res-${Date.now()}`,
+            id: `comm-res-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
             authorName: resolvedBy,
             authorRole: 'Reviewer / Admin',
             comment: `Issue marked as resolved: ${resolutionNotes}`,
-            createdAt: new Date().toISOString(),
+            createdAt: now,
             type: 'RESOLUTION_NOTE' as const,
           }
         ]
@@ -900,9 +1022,9 @@ export const trackDeletedRecords = (ids: (string | undefined | null)[]) => {
         if (clean) current.add(clean);
       }
     });
-    // Keep max 1000 most recent entries to prevent indefinite storage growth
+    // Keep max 5000 most recent entries to prevent indefinite storage growth
     const list = Array.from(current);
-    const trimmed = list.length > 1000 ? list.slice(list.length - 1000) : list;
+    const trimmed = list.length > 5000 ? list.slice(list.length - 5000) : list;
     safeLocalStorageSet(DELETED_IDS_STORAGE_KEY, JSON.stringify(trimmed));
   } catch {
     // ignore
@@ -1161,14 +1283,14 @@ export const reconcileRelationshipsWithNewPOs = (
         targetPoLine = poLineByDescKey.get(descKey);
       }
 
-      if (targetPoLine) {
-        let newPoLineId = line.poLineId;
-        let newPoQty = line.poQuantity;
-        let newUnitCost = line.unitCost;
-        let newUnitPrice = line.unitPrice;
-        let newUom = line.unitOfMeasure;
-        let newVatRate = line.vatRate;
+      let newPoLineId = line.poLineId;
+      let newPoQty = line.poQuantity;
+      let newUnitCost = line.unitCost;
+      let newUnitPrice = line.unitPrice;
+      let newUom = line.unitOfMeasure;
+      let newVatRate = line.vatRate;
 
+      if (targetPoLine) {
         if (!line.poLineId || line.poLineId !== targetPoLine.id) {
           newPoLineId = targetPoLine.id;
           lineModified = true;
@@ -1197,21 +1319,60 @@ export const reconcileRelationshipsWithNewPOs = (
 
         if (lineModified) {
           invModified = true;
-          return {
-            ...line,
-            poLineId: newPoLineId,
-            poQuantity: newPoQty,
-            unitCost: newUnitCost,
-            unitPrice: newUnitPrice,
-            unitOfMeasure: newUom,
-            vatRate: newVatRate,
-          };
         }
       }
-      return line;
+
+      const qty = parseCleanNumber(line.invoicedQuantity ?? (line as any).quantityInvoiced ?? (line as any).billedQuantity ?? (line as any).billQty ?? 0);
+      let price = parseCleanNumber(newUnitPrice ?? line.unitPrice ?? 0);
+      const vRate = newVatRate !== undefined && newVatRate !== null && Number(newVatRate) > 0 && Number(newVatRate) <= 1
+        ? Number(newVatRate)
+        : (line.vatRate !== undefined && line.vatRate !== null && Number(line.vatRate) > 0 && Number(line.vatRate) <= 1 ? Number(line.vatRate) : 0.18);
+      let valBefore = 0;
+      if (qty > 0 && price > 0) {
+        valBefore = Math.round(qty * price * 100) / 100;
+      } else if (parseCleanNumber(line.valueBeforeVat) > 0) {
+        valBefore = parseCleanNumber(line.valueBeforeVat);
+        if (qty > 0 && price === 0) price = Math.round((valBefore / qty) * 100) / 100;
+      } else if (parseCleanNumber(line.totalBeforeVat) > 0) {
+        valBefore = parseCleanNumber(line.totalBeforeVat);
+        if (qty > 0 && price === 0) price = Math.round((valBefore / qty) * 100) / 100;
+      } else if (parseCleanNumber(line.valueAfterVat) > 0) {
+        valBefore = Math.round((parseCleanNumber(line.valueAfterVat) / (1 + vRate)) * 100) / 100;
+        if (qty > 0 && price === 0) price = Math.round((valBefore / qty) * 100) / 100;
+      } else {
+        valBefore = Math.round(qty * price * 100) / 100;
+      }
+
+      let vatAmt = Math.round(valBefore * vRate * 100) / 100;
+      const explicitVat = parseCleanNumber(line.vatAmount);
+      if (explicitVat > 0 && explicitVat <= valBefore * 0.35) {
+        vatAmt = explicitVat;
+      }
+      const valAfter = Math.round((valBefore + vatAmt) * 100) / 100;
+
+      return {
+        ...line,
+        poLineId: newPoLineId,
+        poQuantity: newPoQty,
+        unitCost: newUnitCost,
+        unitPrice: price,
+        unitOfMeasure: newUom,
+        vatRate: vRate,
+        invoicedQuantity: qty,
+        valueBeforeVat: valBefore,
+        totalBeforeVat: valBefore,
+        vatAmount: vatAmt,
+        valueAfterVat: valAfter,
+        totalAfterVat: valAfter,
+      };
     });
 
-    if (invModified) {
+    const effSubtotal = Math.round(updatedLines.reduce((s, l) => s + (parseCleanNumber(l.valueBeforeVat) || 0), 0) * 100) / 100;
+    const effVat = Math.round(updatedLines.reduce((s, l) => s + (parseCleanNumber(l.vatAmount) || 0), 0) * 100) / 100;
+    const effTotal = Math.round((effSubtotal + effVat) * 100) / 100;
+
+    const currentTotal = parseCleanNumber(inv.totalAfterVat);
+    if (invModified || currentTotal <= 0 || (effTotal > 0 && Math.abs(currentTotal - effTotal) > 1)) {
       invoicesUpdated++;
       return {
         ...inv,
@@ -1220,6 +1381,9 @@ export const reconcileRelationshipsWithNewPOs = (
         contract: newContract,
         poDate: newPoDate,
         lines: updatedLines,
+        subtotalBeforeVat: effSubtotal > 0 ? effSubtotal : (parseCleanNumber(inv.subtotalBeforeVat) || effSubtotal),
+        totalVat: effVat > 0 ? effVat : (parseCleanNumber(inv.totalVat) || effVat),
+        totalAfterVat: effTotal > 0 ? effTotal : (effSubtotal + effVat),
       };
     }
     return inv;
@@ -1742,11 +1906,12 @@ export const calculateDashboardMetrics = (
 
 export const CURRENCY_CODE = 'TZS';
 
-export const formatCurrency = (amount: number): string => {
+export const formatCurrency = (amount: any): string => {
+  const num = parseCleanNumber(amount);
   return new Intl.NumberFormat('en-US', {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
-  }).format(amount || 0);
+  }).format(num);
 };
 
 export const formatMoney = (amount: number): string => {

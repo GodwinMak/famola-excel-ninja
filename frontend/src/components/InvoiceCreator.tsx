@@ -12,6 +12,7 @@ import { ImageAttachmentManager } from './ImageAttachmentManager';
 import { SmsConfirmationModal } from './SmsConfirmationModal';
 import { 
   formatCurrency, 
+  parseCleanNumber,
   loadStoredSeriesConfig, 
   formatSeriesNumber,
   loadStoredCustomerSeriesBooks,
@@ -288,10 +289,48 @@ export const InvoiceCreator: React.FC<InvoiceCreatorProps> = ({
       }
 
       setInvoiceLines(
-        editingInvoice.lines.map((l) => ({
-          ...l,
-          isSelected: true,
-        }))
+        editingInvoice.lines.map((l) => {
+          const qty = parseCleanNumber(l.invoicedQuantity ?? l.quantityInvoiced ?? l.billedQuantity ?? l.billQty ?? 0);
+          let price = parseCleanNumber(l.unitPrice ?? 0);
+          const vRate =
+            l.vatRate !== undefined && l.vatRate !== null && Number(l.vatRate) > 0 && Number(l.vatRate) <= 1
+              ? Number(l.vatRate)
+              : (vatRate || 0.18);
+          let valBefore = 0;
+          if (qty > 0 && price > 0) {
+            valBefore = Math.round(qty * price * 100) / 100;
+          } else if (parseCleanNumber(l.valueBeforeVat) > 0) {
+            valBefore = parseCleanNumber(l.valueBeforeVat);
+            if (qty > 0 && price === 0) price = Math.round((valBefore / qty) * 100) / 100;
+          } else if (parseCleanNumber(l.totalBeforeVat) > 0) {
+            valBefore = parseCleanNumber(l.totalBeforeVat);
+            if (qty > 0 && price === 0) price = Math.round((valBefore / qty) * 100) / 100;
+          } else if (parseCleanNumber(l.valueAfterVat) > 0) {
+            valBefore = Math.round((parseCleanNumber(l.valueAfterVat) / (1 + vRate)) * 100) / 100;
+            if (qty > 0 && price === 0) price = Math.round((valBefore / qty) * 100) / 100;
+          } else {
+            valBefore = Math.round(qty * price * 100) / 100;
+          }
+          let vatAmt = Math.round(valBefore * vRate * 100) / 100;
+          const explicitVat = parseCleanNumber(l.vatAmount);
+          if (explicitVat > 0 && explicitVat <= valBefore * 0.35) {
+            vatAmt = explicitVat;
+          }
+          const valAfter = Math.round((valBefore + vatAmt) * 100) / 100;
+
+          return {
+            ...l,
+            invoicedQuantity: qty,
+            unitPrice: price,
+            vatRate: vRate,
+            valueBeforeVat: valBefore,
+            totalBeforeVat: valBefore,
+            vatAmount: vatAmt,
+            valueAfterVat: valAfter,
+            totalAfterVat: valAfter,
+            isSelected: true,
+          };
+        })
       );
     } else {
       // Default creation: keep PO Number empty!
@@ -346,9 +385,10 @@ export const InvoiceCreator: React.FC<InvoiceCreatorProps> = ({
     const lines: InvoiceLineItem[] = targetGroup.lines.map((poLine) => {
       const alreadyInvoiced = poLine.invoicedQuantity || 0;
       const available = Math.max(0, poLine.quantity - alreadyInvoiced);
-      const initInvoicedQty = available;
+      const initInvoicedQty = available > 0 ? available : poLine.quantity;
       const valBeforeVat = Math.round(initInvoicedQty * poLine.unitPrice * 100) / 100;
       const vatAmt = Math.round(valBeforeVat * (poLine.vatRate || vatRate) * 100) / 100;
+      const valAfterVat = Math.round((valBeforeVat + vatAmt) * 100) / 100;
 
       return {
         id: `inv-line-${poLine.id}-${Date.now()}`,
@@ -364,10 +404,10 @@ export const InvoiceCreator: React.FC<InvoiceCreatorProps> = ({
         valueBeforeVat: valBeforeVat,
         totalBeforeVat: valBeforeVat,
         vatAmount: vatAmt,
-        valueAfterVat: Math.round((valBeforeVat + vatAmt) * 100) / 100,
-        totalAfterVat: Math.round((valBeforeVat + vatAmt) * 100) / 100,
+        valueAfterVat: valAfterVat,
+        totalAfterVat: valAfterVat,
         comment: 'Okay',
-        isSelected: available > 0,
+        isSelected: true,
         hasIssue: hasTransactionIssue,
         issueComment: hasTransactionIssue ? 'Discrepancy' : undefined,
       };
@@ -652,26 +692,29 @@ export const InvoiceCreator: React.FC<InvoiceCreatorProps> = ({
 
   // Line changes
   const handleQuantityChange = (index: number, val: string) => {
-    const parsed = parseFloat(val);
-    const qty = isNaN(parsed) ? 0 : parsed;
+    const qty = parseCleanNumber(val);
 
     setInvoiceLines((prev) => {
       const updated = [...prev];
       const target = updated[index];
-      const maxAllowed = editingInvoice ? 999999 : target.availableQuantity;
-      const finalQty = hasTransactionIssue ? Math.max(0, qty) : Math.min(Math.max(0, qty), maxAllowed);
+      const maxAllowed = editingInvoice ? 999999 : (target.availableQuantity > 0 ? target.availableQuantity : target.poQuantity || 999999);
+      const finalQty = hasTransactionIssue || target.availableQuantity <= 0 ? Math.max(0, qty) : Math.min(Math.max(0, qty), maxAllowed);
+      const unitP = parseCleanNumber(target.unitPrice ?? 0);
 
-      const valBeforeVat = Math.round(finalQty * target.unitPrice * 100) / 100;
-      const vatAmt = Math.round(valBeforeVat * (target.vatRate || vatRate) * 100) / 100;
+      const valBeforeVat = Math.round(finalQty * unitP * 100) / 100;
+      const vRate = target.vatRate || vatRate || 0.18;
+      const vatAmt = Math.round(valBeforeVat * vRate * 100) / 100;
+      const valAfterVat = Math.round((valBeforeVat + vatAmt) * 100) / 100;
 
       updated[index] = {
         ...target,
         invoicedQuantity: finalQty,
+        unitPrice: unitP,
         valueBeforeVat: valBeforeVat,
         totalBeforeVat: valBeforeVat,
         vatAmount: vatAmt,
-        valueAfterVat: Math.round((valBeforeVat + vatAmt) * 100) / 100,
-        totalAfterVat: Math.round((valBeforeVat + vatAmt) * 100) / 100,
+        valueAfterVat: valAfterVat,
+        totalAfterVat: valAfterVat,
         isSelected: finalQty > 0 || hasTransactionIssue,
       };
       return updated;
@@ -761,10 +804,21 @@ export const InvoiceCreator: React.FC<InvoiceCreatorProps> = ({
 
     invoiceLines.forEach((l) => {
       if (l.isSelected) {
-        subtotal += l.totalBeforeVat;
-        vat += l.vatAmount;
+        const qty = parseCleanNumber(l.invoicedQuantity ?? 0);
+        const price = parseCleanNumber(l.unitPrice ?? 0);
+        const vRate = l.vatRate !== undefined && l.vatRate !== null ? Number(l.vatRate) : vatRate;
+        const lineBefore = (qty > 0 && price > 0)
+          ? Math.round(qty * price * 100) / 100
+          : (parseCleanNumber(l.totalBeforeVat) || parseCleanNumber(l.valueBeforeVat) || Math.round(qty * price * 100) / 100);
+        const explicitVat = parseCleanNumber(l.vatAmount);
+        const lineVat = explicitVat > 0 && explicitVat <= lineBefore * 0.35
+          ? explicitVat
+          : Math.round(lineBefore * vRate * 100) / 100;
+
+        subtotal += lineBefore;
+        vat += lineVat;
         selectedCount += 1;
-        totalItems += l.invoicedQuantity;
+        totalItems += qty;
       }
     });
 
@@ -775,7 +829,7 @@ export const InvoiceCreator: React.FC<InvoiceCreatorProps> = ({
       selectedCount,
       totalItemsCount: totalItems,
     };
-  }, [invoiceLines]);
+  }, [invoiceLines, vatRate]);
 
   // Save Invoice & Proceed to Next
   const handleSave = async (andPrint: boolean = false) => {
@@ -1653,13 +1707,44 @@ export const InvoiceCreator: React.FC<InvoiceCreatorProps> = ({
                       </td>
 
                       {/* VAT */}
-                      <td className="py-1 px-2 text-right text-slate-500">
-                        TZS {formatCurrency(line.isSelected ? line.vatAmount : 0)}
+                      <td className="py-1 px-2 text-right text-slate-500 font-mono">
+                        {(() => {
+                          const qty = parseCleanNumber(line.invoicedQuantity ?? 0);
+                          const price = parseCleanNumber(line.unitPrice ?? 0);
+                          const vRate =
+                            line.vatRate !== undefined && line.vatRate !== null && Number(line.vatRate) > 0 && Number(line.vatRate) <= 1
+                              ? Number(line.vatRate)
+                              : (vatRate || 0.18);
+                          const vb = (qty > 0 && price > 0)
+                            ? Math.round(qty * price * 100) / 100
+                            : (parseCleanNumber(line.valueBeforeVat) || Math.round(qty * price * 100) / 100);
+                          const explicitVat = parseCleanNumber(line.vatAmount);
+                          const va = (explicitVat > 0 && explicitVat <= vb * 0.35)
+                            ? explicitVat
+                            : Math.round(vb * vRate * 100) / 100;
+                          return `TZS ${formatCurrency(va)}`;
+                        })()}
                       </td>
 
                       {/* Line Total */}
-                      <td className="py-1 px-2 text-right font-bold text-slate-900">
-                        TZS {formatCurrency(line.isSelected ? line.totalAfterVat : 0)}
+                      <td className="py-1 px-2 text-right font-bold text-slate-900 font-mono">
+                        {(() => {
+                          const qty = parseCleanNumber(line.invoicedQuantity ?? 0);
+                          const price = parseCleanNumber(line.unitPrice ?? 0);
+                          const vRate =
+                            line.vatRate !== undefined && line.vatRate !== null && Number(line.vatRate) > 0 && Number(line.vatRate) <= 1
+                              ? Number(line.vatRate)
+                              : (vatRate || 0.18);
+                          const vb = (qty > 0 && price > 0)
+                            ? Math.round(qty * price * 100) / 100
+                            : (parseCleanNumber(line.valueBeforeVat) || Math.round(qty * price * 100) / 100);
+                          const explicitVat = parseCleanNumber(line.vatAmount);
+                          const va = (explicitVat > 0 && explicitVat <= vb * 0.35)
+                            ? explicitVat
+                            : Math.round(vb * vRate * 100) / 100;
+                          const lineTot = Math.round((vb + va) * 100) / 100;
+                          return `TZS ${formatCurrency(lineTot)}`;
+                        })()}
                       </td>
 
                       {/* Admin remove line with SMS confirmation */}

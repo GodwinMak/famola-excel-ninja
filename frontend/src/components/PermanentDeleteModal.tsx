@@ -6,7 +6,7 @@ export interface PermanentDeleteModalProps {
   isOpen: boolean;
   onClose: () => void;
   onConfirm: () => void;
-  transactionType: 'INVOICE' | 'DELIVERY_NOTE' | 'PAYMENT' | 'PURCHASE_ORDER' | 'LINE_ITEM' | 'ISSUE';
+  transactionType: 'INVOICE' | 'DELIVERY_NOTE' | 'PAYMENT' | 'PURCHASE_ORDER' | 'LINE_ITEM' | 'ISSUE' | 'USER' | 'INVITATION' | 'CUSTOM_SERIES';
   referenceNumber: string;
   customerName?: string;
   poNumber?: string;
@@ -47,6 +47,12 @@ export const PermanentDeleteModal: React.FC<PermanentDeleteModalProps> = ({
         return 'Item Line from Database';
       case 'ISSUE':
         return 'Issue Discrepancy Record';
+      case 'USER':
+        return 'User Account';
+      case 'INVITATION':
+        return 'Email Access Invitation';
+      case 'CUSTOM_SERIES':
+        return 'Customer Series Book';
       default:
         return 'Transaction Record';
     }
@@ -66,6 +72,14 @@ export const PermanentDeleteModal: React.FC<PermanentDeleteModalProps> = ({
         return 'This individual line item will be permanently purged from the database, recalculating document totals.';
       case 'ISSUE':
         return 'This issue log and all associated resolution comments will be permanently erased from the resolution registry.';
+      case 'USER':
+        return 'This user account and access credentials will be permanently erased from the system.';
+      case 'INVITATION':
+        return 'This email invitation will be revoked and permanently removed from pending access.';
+      case 'CUSTOM_SERIES':
+        return 'This customer series book will be deleted and numbering will revert to the default series.';
+      default:
+        return 'This record will be permanently deleted from the database.';
     }
   };
 

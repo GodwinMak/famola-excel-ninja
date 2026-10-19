@@ -40,6 +40,7 @@ import { PaymentReceiptModal } from './PaymentReceiptModal';
 import { canDeleteData } from '../utils/authService';
 import { naturalCompare } from '../utils/naturalSort';
 import { PermanentDeleteModal } from './PermanentDeleteModal';
+import { getEffectiveInvoiceTotals } from './InvoiceHistory';
 
 interface PaymentsManagerProps {
   payments?: PaymentRecord[];
@@ -97,11 +98,12 @@ export const PaymentsManager: React.FC<PaymentsManagerProps> = ({
     const safePayments = payments || [];
     const safeInvoices = invoices || [];
     const totalCollected = safePayments.reduce((sum, p) => sum + (p.amountPaid || 0), 0);
-    const totalInvoiced = safeInvoices.reduce((sum, inv) => sum + (inv.totalAfterVat || 0), 0);
+    const totalInvoiced = safeInvoices.reduce((sum, inv) => sum + getEffectiveInvoiceTotals(inv).total, 0);
     const totalOutstanding = Math.max(0, totalInvoiced - totalCollected);
-    const fullyPaidInvoicesCount = safeInvoices.filter(
-      (inv) => (inv.paidAmount || 0) >= (inv.totalAfterVat || 0) && (inv.totalAfterVat || 0) > 0
-    ).length;
+    const fullyPaidInvoicesCount = safeInvoices.filter((inv) => {
+      const invTot = getEffectiveInvoiceTotals(inv).total;
+      return (inv.paidAmount || 0) >= invTot && invTot > 0;
+    }).length;
     const collectionRate = totalInvoiced > 0 ? Math.min(100, Math.round((totalCollected / totalInvoiced) * 100)) : 0;
 
     return {
@@ -128,10 +130,10 @@ export const PaymentsManager: React.FC<PaymentsManagerProps> = ({
   const selectedCustomerStats = useMemo(() => {
     if (!selectedCustomer) return null;
     const custInvoices = (invoices || []).filter((inv) => inv.customerName === selectedCustomer);
-    const totalInv = custInvoices.reduce((sum, inv) => sum + (inv.totalAfterVat || 0), 0);
+    const totalInv = custInvoices.reduce((sum, inv) => sum + getEffectiveInvoiceTotals(inv).total, 0);
     const totalPaid = custInvoices.reduce((sum, inv) => sum + (inv.paidAmount || 0), 0);
     const balance = Math.max(0, totalInv - totalPaid);
-    const openInvoices = custInvoices.filter((inv) => (inv.totalAfterVat || 0) - (inv.paidAmount || 0) > 0.01);
+    const openInvoices = custInvoices.filter((inv) => getEffectiveInvoiceTotals(inv).total - (inv.paidAmount || 0) > 0.01);
 
     return {
       totalInvoices: custInvoices.length,

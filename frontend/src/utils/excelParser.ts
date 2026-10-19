@@ -559,67 +559,89 @@ export const exportInvoicesToExcel = (invoices: InvoiceRecord[], filename = 'Inv
     const invComment = inv.comment || 'Okay';
     const invNotes = inv.notes || '';
 
-    const invSubtotal = typeof inv.subtotalBeforeVat === 'number' && inv.subtotalBeforeVat > 0
-      ? inv.subtotalBeforeVat
-      : typeof (inv as any).subtotal === 'number' && (inv as any).subtotal > 0
-        ? (inv as any).subtotal
-        : 0;
-
-    const invVat = typeof inv.totalVat === 'number' && inv.totalVat > 0
-      ? inv.totalVat
-      : Math.round(invSubtotal * 0.18 * 100) / 100;
-
-    const invTotal = typeof inv.totalAfterVat === 'number' && inv.totalAfterVat > 0
-      ? inv.totalAfterVat
-      : typeof (inv as any).totalAmount === 'number' && (inv as any).totalAmount > 0
-        ? (inv as any).totalAmount
-        : Math.round((invSubtotal + invVat) * 100) / 100;
-
-    const paidAmt = typeof inv.paidAmount === 'number' ? inv.paidAmount : 0;
-    const pendingBalance = Math.max(0, Math.round((invTotal - paidAmt) * 100) / 100);
-
     const lines = Array.isArray(inv.lines) && inv.lines.length > 0 ? inv.lines : null;
+
+    let calcSub = 0;
+    let calcVat = 0;
+    if (lines) {
+      lines.forEach((l) => {
+        const qty = parseNumber(l.invoicedQuantity ?? (l as any).quantityInvoiced ?? (l as any).billedQuantity ?? (l as any).billQty ?? 0);
+        const price = parseNumber(l.unitPrice ?? 0);
+        const vRate = l.vatRate !== undefined && l.vatRate !== null && Number(l.vatRate) > 0 && Number(l.vatRate) <= 1 ? Number(l.vatRate) : 0.18;
+        const lb = (qty > 0 && price > 0)
+          ? Math.round(qty * price * 100) / 100
+          : (parseNumber(l.valueBeforeVat) > 0)
+            ? parseNumber(l.valueBeforeVat)
+            : Math.round(qty * price * 100) / 100;
+        let lv = Math.round(lb * vRate * 100) / 100;
+        const explicitVat = parseNumber(l.vatAmount);
+        if (explicitVat > 0 && explicitVat <= lb * 0.35) {
+          lv = explicitVat;
+        }
+        calcSub += lb;
+        calcVat += lv;
+      });
+      calcSub = Math.round(calcSub * 100) / 100;
+      calcVat = Math.round(calcVat * 100) / 100;
+    }
+
+    const invSubtotal = calcSub > 0
+      ? calcSub
+      : parseNumber(inv.subtotalBeforeVat) > 0
+        ? parseNumber(inv.subtotalBeforeVat)
+        : parseNumber((inv as any).subtotal) > 0
+          ? parseNumber((inv as any).subtotal)
+          : 0;
+
+    const invVat = calcVat > 0
+      ? calcVat
+      : parseNumber(inv.totalVat) > 0
+        ? parseNumber(inv.totalVat)
+        : Math.round(invSubtotal * 0.18 * 100) / 100;
+
+    const invTotal = (calcSub + calcVat) > 0
+      ? Math.round((calcSub + calcVat) * 100) / 100
+      : parseNumber(inv.totalAfterVat) > 0
+        ? parseNumber(inv.totalAfterVat)
+        : parseNumber((inv as any).totalAmount) > 0
+          ? parseNumber((inv as any).totalAmount)
+          : Math.round((invSubtotal + invVat) * 100) / 100;
+
+    const paidAmt = parseNumber(inv.paidAmount);
+    const pendingBalance = Math.max(0, Math.round((invTotal - paidAmt) * 100) / 100);
 
     if (lines) {
       lines.forEach((line, idx) => {
         if (!line) return;
-        const invoicedQty = typeof line.invoicedQuantity === 'number'
-          ? line.invoicedQuantity
-          : parseFloat(String(line.invoicedQuantity || '0')) || 0;
+        const invoicedQty = parseNumber(line.invoicedQuantity ?? (line as any).quantityInvoiced ?? 0);
+        const poQty = parseNumber(line.poQuantity, invoicedQty);
+        let unitPrice = parseNumber(line.unitPrice);
 
-        const poQty = typeof line.poQuantity === 'number'
-          ? line.poQuantity
-          : parseFloat(String(line.poQuantity || '0')) || invoicedQty;
+        const vRate = line.vatRate !== undefined && line.vatRate !== null && Number(line.vatRate) > 0 && Number(line.vatRate) <= 1 ? Number(line.vatRate) : 0.18;
 
-        let unitPrice = typeof line.unitPrice === 'number'
-          ? line.unitPrice
-          : parseFloat(String(line.unitPrice || '0')) || 0;
+        let lineValBefore = (invoicedQty > 0 && unitPrice > 0)
+          ? Math.round(invoicedQty * unitPrice * 100) / 100
+          : parseNumber(line.valueBeforeVat) > 0
+            ? parseNumber(line.valueBeforeVat)
+            : parseNumber((line as any).totalBeforeVat) > 0
+              ? parseNumber((line as any).totalBeforeVat)
+              : Math.round(invoicedQty * unitPrice * 100) / 100;
 
-        let lineValBefore = (typeof line.valueBeforeVat === 'number' && line.valueBeforeVat > 0)
-          ? line.valueBeforeVat
-          : (typeof (line as any).totalBeforeVat === 'number' && (line as any).totalBeforeVat > 0)
-            ? (line as any).totalBeforeVat
-            : Math.round(invoicedQty * unitPrice * 100) / 100;
-
-        // If line value is 0 but invoice has subtotal and this is the only line
         if (lineValBefore === 0 && invSubtotal > 0 && lines.length === 1) {
           lineValBefore = invSubtotal;
         }
 
-        // Backfill unit price if price is 0 but line value is known
         if (unitPrice === 0 && invoicedQty > 0 && lineValBefore > 0) {
           unitPrice = Math.round((lineValBefore / invoicedQty) * 100) / 100;
         }
 
-        let lineVat = (typeof line.vatAmount === 'number' && line.vatAmount > 0)
-          ? line.vatAmount
-          : Math.round(lineValBefore * (line.vatRate || 0.18) * 100) / 100;
+        let lineVat = Math.round(lineValBefore * vRate * 100) / 100;
+        const explicitLineVat = parseNumber(line.vatAmount);
+        if (explicitLineVat > 0 && explicitLineVat <= lineValBefore * 0.35) {
+          lineVat = explicitLineVat;
+        }
 
-        let lineValAfter = (typeof line.valueAfterVat === 'number' && line.valueAfterVat > 0)
-          ? line.valueAfterVat
-          : (typeof (line as any).totalAfterVat === 'number' && (line as any).totalAfterVat > 0)
-            ? (line as any).totalAfterVat
-            : Math.round((lineValBefore + lineVat) * 100) / 100;
+        const lineValAfter = Math.round((lineValBefore + lineVat) * 100) / 100;
 
         flattenedRows.push({
           'INVOICE NUMBER': invNumber,

@@ -16,6 +16,12 @@ export interface DatabasePayload {
   deliveryNotes?: DeliveryNoteRecord[];
   payments?: PaymentRecord[];
   issues?: DocumentIssueRecord[];
+  users?: AppUser[];
+  seriesConfig?: any;
+  customerBooks?: CustomerSeriesBook[];
+  deletedIds?: string[];
+  source?: string;
+  lastSyncSource?: string;
   replace?: boolean;
 }
 
@@ -248,3 +254,158 @@ export const persistServerDatabase = async (payload: DatabasePayload): Promise<b
   await new Promise((r) => setTimeout(r, 1200));
   return await attemptFetch(35000);
 };
+
+/**
+ * Permanently delete an invoice atomically on the server.
+ */
+export const deleteServerInvoice = async (invoiceId: string): Promise<boolean> => {
+  try {
+    const res = await fetch(`${API_BASE}/api/invoices/${encodeURIComponent(invoiceId)}`, {
+      method: 'DELETE',
+      headers: { ...authHeaders() },
+    });
+    return res.ok;
+  } catch (err) {
+    console.warn(`Failed to delete invoice ${invoiceId} on server:`, err);
+    return false;
+  }
+};
+
+/**
+ * Permanently delete a delivery note atomically on the server.
+ */
+export const deleteServerDeliveryNote = async (dnId: string): Promise<boolean> => {
+  try {
+    const res = await fetch(`${API_BASE}/api/delivery-notes/${encodeURIComponent(dnId)}`, {
+      method: 'DELETE',
+      headers: { ...authHeaders() },
+    });
+    return res.ok;
+  } catch (err) {
+    console.warn(`Failed to delete delivery note ${dnId} on server:`, err);
+    return false;
+  }
+};
+
+/**
+ * Permanently delete a payment atomically on the server.
+ */
+export const deleteServerPayment = async (paymentId: string): Promise<boolean> => {
+  try {
+    const res = await fetch(`${API_BASE}/api/payments/${encodeURIComponent(paymentId)}`, {
+      method: 'DELETE',
+      headers: { ...authHeaders() },
+    });
+    return res.ok;
+  } catch (err) {
+    console.warn(`Failed to delete payment ${paymentId} on server:`, err);
+    return false;
+  }
+};
+
+/**
+ * Permanently delete an issue atomically on the server.
+ */
+export const deleteServerIssue = async (issueId: string): Promise<boolean> => {
+  try {
+    const res = await fetch(`${API_BASE}/api/issues/${encodeURIComponent(issueId)}`, {
+      method: 'DELETE',
+      headers: { ...authHeaders() },
+    });
+    return res.ok;
+  } catch (err) {
+    console.warn(`Failed to delete issue ${issueId} on server:`, err);
+    return false;
+  }
+};
+
+/**
+ * Permanently delete a single invoice line item atomically on the server.
+ */
+export const deleteServerInvoiceLine = async (invoiceId: string, lineId: string): Promise<boolean> => {
+  try {
+    const res = await fetch(`${API_BASE}/api/invoices/${encodeURIComponent(invoiceId)}/lines/${encodeURIComponent(lineId)}`, {
+      method: 'DELETE',
+      headers: { ...authHeaders() },
+    });
+    return res.ok;
+  } catch (err) {
+    console.warn(`Failed to delete invoice line ${lineId} on server:`, err);
+    return false;
+  }
+};
+
+/**
+ * Permanently delete a single delivery note line item atomically on the server.
+ */
+export const deleteServerDeliveryNoteLine = async (dnId: string, lineId: string): Promise<boolean> => {
+  try {
+    const res = await fetch(`${API_BASE}/api/delivery-notes/${encodeURIComponent(dnId)}/lines/${encodeURIComponent(lineId)}`, {
+      method: 'DELETE',
+      headers: { ...authHeaders() },
+    });
+    return res.ok;
+  } catch (err) {
+    console.warn(`Failed to delete delivery note line ${lineId} on server:`, err);
+    return false;
+  }
+};
+
+/**
+ * Permanently delete an entire PO by poNumber atomically on the server.
+ */
+export const deleteServerPO = async (poNumber: string): Promise<boolean> => {
+  try {
+    const res = await fetch(`${API_BASE}/api/po-lines?poNumber=${encodeURIComponent(poNumber)}`, {
+      method: 'DELETE',
+      headers: { ...authHeaders() },
+    });
+    return res.ok;
+  } catch (err) {
+    console.warn(`Failed to delete PO ${poNumber} on server:`, err);
+    return false;
+  }
+};
+
+/**
+ * Permanently delete a single PO line item atomically on the server.
+ */
+export const deleteServerPOLine = async (lineId: string): Promise<boolean> => {
+  try {
+    const res = await fetch(`${API_BASE}/api/po-lines/${encodeURIComponent(lineId)}`, {
+      method: 'DELETE',
+      headers: { ...authHeaders() },
+    });
+    return res.ok;
+  } catch (err) {
+    console.warn(`Failed to delete PO line ${lineId} on server:`, err);
+    return false;
+  }
+};
+
+/**
+ * Auto-calculate and update totals for all invoices and delivery notes on the server.
+ */
+export const recalculateAllInvoiceTotalsOnServer = async (): Promise<{
+  success: boolean;
+  updatedInvoicesCount: number;
+  updatedDNsCount: number;
+  totalInvoices: number;
+  totalDeliveryNotes: number;
+} | null> => {
+  try {
+    const res = await fetch(`${API_BASE}/api/database/recalculate-totals`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...authHeaders(),
+      },
+    });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch (err) {
+    console.warn('Failed to recalculate totals on server:', err);
+    return null;
+  }
+};
+

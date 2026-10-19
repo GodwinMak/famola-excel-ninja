@@ -1,6 +1,6 @@
 import React, { useState, useMemo } from 'react';
 import { InvoiceRecord, AppUser, DocumentIssueRecord } from '../types';
-import { formatCurrency } from '../utils/storage';
+import { formatCurrency, parseCleanNumber } from '../utils/storage';
 import { exportInvoicesToExcel } from '../utils/excelParser';
 import { exportTableToExcel, exportTableToPdf } from '../utils/tableExport';
 import { TableExportToolbar } from './TableExportToolbar';
@@ -31,11 +31,75 @@ import {
   X,
   Save,
   CheckCircle2,
-  Image as ImageIcon
+  Image as ImageIcon,
+  Calculator,
+  RefreshCw,
 } from 'lucide-react';
 import { ImageAttachmentManager } from './ImageAttachmentManager';
 import { InvoiceDatabaseImportModal } from './InvoiceDatabaseImportModal';
 import { SmsConfirmationModal } from './SmsConfirmationModal';
+import { deleteServerInvoiceLine } from '../utils/databaseService';
+
+export const getEffectiveInvoiceTotals = (inv: InvoiceRecord) => {
+  const lines = inv.lines || [];
+  let sub = parseCleanNumber(inv.subtotalBeforeVat);
+  let vt = parseCleanNumber(inv.totalVat);
+  let tot = parseCleanNumber(inv.totalAfterVat);
+
+  if (lines.length > 0) {
+    let calcSub = 0;
+    let calcVat = 0;
+    for (const l of lines) {
+      const qty = parseCleanNumber(l.invoicedQuantity ?? (l as any).quantityInvoiced ?? (l as any).billedQuantity ?? (l as any).billQty ?? 0);
+      let price = parseCleanNumber(l.unitPrice ?? 0);
+      const vRate =
+        l.vatRate !== undefined && l.vatRate !== null && Number(l.vatRate) > 0 && Number(l.vatRate) <= 1
+          ? Number(l.vatRate)
+          : 0.18;
+
+      let lineBefore = 0;
+      if (qty > 0 && price > 0) {
+        lineBefore = Math.round(qty * price * 100) / 100;
+      } else if (parseCleanNumber(l.valueBeforeVat) > 0) {
+        lineBefore = parseCleanNumber(l.valueBeforeVat);
+        if (qty > 0 && price === 0) price = Math.round((lineBefore / qty) * 100) / 100;
+      } else if (parseCleanNumber(l.totalBeforeVat) > 0) {
+        lineBefore = parseCleanNumber(l.totalBeforeVat);
+        if (qty > 0 && price === 0) price = Math.round((lineBefore / qty) * 100) / 100;
+      } else if (parseCleanNumber(l.valueAfterVat) > 0) {
+        lineBefore = Math.round((parseCleanNumber(l.valueAfterVat) / (1 + vRate)) * 100) / 100;
+        if (qty > 0 && price === 0) price = Math.round((lineBefore / qty) * 100) / 100;
+      } else {
+        lineBefore = Math.round(qty * price * 100) / 100;
+      }
+
+      let lineVat = Math.round(lineBefore * vRate * 100) / 100;
+      const explicitVat = parseCleanNumber(l.vatAmount);
+      if (explicitVat > 0 && explicitVat <= lineBefore * 0.35) {
+        lineVat = explicitVat;
+      }
+
+      calcSub += lineBefore;
+      calcVat += lineVat;
+    }
+    calcSub = Math.round(calcSub * 100) / 100;
+    calcVat = Math.round(calcVat * 100) / 100;
+    const calcTot = Math.round((calcSub + calcVat) * 100) / 100;
+
+    if (tot <= 0 || sub <= 0 || isNaN(tot) || (calcTot > 0 && Math.abs(calcTot - tot) > 1)) {
+      sub = calcSub;
+      vt = calcVat;
+      tot = calcTot;
+    }
+  } else if (tot > 0 && sub <= 0) {
+    sub = Math.round((tot / 1.18) * 100) / 100;
+    vt = Math.round((tot - sub) * 100) / 100;
+  } else if (sub > 0 && tot <= 0) {
+    vt = Math.round(sub * 0.18 * 100) / 100;
+    tot = Math.round((sub + vt) * 100) / 100;
+  }
+  return { subtotal: sub, vat: vt, total: tot };
+};
 
 interface InvoiceHistoryProps {
   invoices?: InvoiceRecord[];
@@ -43,6 +107,7 @@ interface InvoiceHistoryProps {
   onViewInvoicePrint?: (invoice: InvoiceRecord) => void;
   onPrintInvoice?: (invoice: InvoiceRecord) => void; // alias fallback
   onDeleteInvoice: (invoiceId: string) => void;
+  onRecalculateTotals?: () => void;
   onNavigateToCreateInvoice?: () => void;
   onCreateNewInvoice?: () => void; // alias fallback
   onReloadInvoice?: (invoice: InvoiceRecord) => void;
@@ -59,6 +124,7 @@ export const InvoiceHistory: React.FC<InvoiceHistoryProps> = ({
   onViewInvoicePrint,
   onPrintInvoice,
   onDeleteInvoice,
+  onRecalculateTotals,
   onNavigateToCreateInvoice,
   onCreateNewInvoice,
   onReloadInvoice,
@@ -139,6 +205,10 @@ export const InvoiceHistory: React.FC<InvoiceHistoryProps> = ({
 
     onSaveInvoice(updatedInvoice);
 
+    if (deletedItem?.id || deletedItem?.poLineId) {
+      deleteServerInvoiceLine(invoice.id, deletedItem.id || deletedItem.poLineId);
+    }
+
     // If the edit modal is currently open for this invoice, keep editLines and editModalInvoice in sync
     if (editModalInvoice && editModalInvoice.id === invoice.id) {
       setEditLines((prev) => prev.filter((_, i) => i !== lineIndex));
@@ -161,27 +231,65 @@ export const InvoiceHistory: React.FC<InvoiceHistoryProps> = ({
     setEditFlagStatus(status);
 
     setEditLines(
-      (inv.lines || []).map((line) => ({
-        ...line,
-        invoicedQuantity: line.invoicedQuantity || 0,
-      }))
+      (inv.lines || []).map((line) => {
+        const qty = parseCleanNumber(line.invoicedQuantity ?? (line as any).quantityInvoiced ?? (line as any).billedQuantity ?? (line as any).billQty ?? 0);
+        let price = parseCleanNumber(line.unitPrice ?? 0);
+        const vRate =
+          line.vatRate !== undefined && line.vatRate !== null && Number(line.vatRate) > 0 && Number(line.vatRate) <= 1
+            ? Number(line.vatRate)
+            : 0.18;
+        let valBefore = 0;
+        if (qty > 0 && price > 0) {
+          valBefore = Math.round(qty * price * 100) / 100;
+        } else if (parseCleanNumber(line.valueBeforeVat) > 0) {
+          valBefore = parseCleanNumber(line.valueBeforeVat);
+          if (qty > 0 && price === 0) price = Math.round((valBefore / qty) * 100) / 100;
+        } else if (parseCleanNumber(line.totalBeforeVat) > 0) {
+          valBefore = parseCleanNumber(line.totalBeforeVat);
+          if (qty > 0 && price === 0) price = Math.round((valBefore / qty) * 100) / 100;
+        } else if (parseCleanNumber(line.valueAfterVat) > 0) {
+          valBefore = Math.round((parseCleanNumber(line.valueAfterVat) / (1 + vRate)) * 100) / 100;
+          if (qty > 0 && price === 0) price = Math.round((valBefore / qty) * 100) / 100;
+        } else {
+          valBefore = Math.round(qty * price * 100) / 100;
+        }
+        let vatAmt = Math.round(valBefore * vRate * 100) / 100;
+        const explicitVat = parseCleanNumber(line.vatAmount);
+        if (explicitVat > 0 && explicitVat <= valBefore * 0.35) {
+          vatAmt = explicitVat;
+        }
+        const valAfter = Math.round((valBefore + vatAmt) * 100) / 100;
+
+        return {
+          ...line,
+          invoicedQuantity: qty,
+          unitPrice: price,
+          vatRate: vRate,
+          valueBeforeVat: valBefore,
+          totalBeforeVat: valBefore,
+          vatAmount: vatAmt,
+          valueAfterVat: valAfter,
+          totalAfterVat: valAfter,
+        };
+      })
     );
     setEditError(null);
   };
 
   const handleEditLineQuantity = (idx: number, rawVal: string) => {
-    const val = parseFloat(rawVal);
-    const qty = isNaN(val) ? 0 : Math.max(0, val);
+    const qty = parseCleanNumber(rawVal);
     setEditLines((prev) => {
       const updated = [...prev];
       const target = updated[idx];
-      const valBefore = Math.round(qty * target.unitPrice * 100) / 100;
+      const price = parseCleanNumber(target.unitPrice ?? 0);
+      const valBefore = Math.round(qty * price * 100) / 100;
       const vRate = target.vatRate ?? 0.18;
       const vatAmt = Math.round(valBefore * vRate * 100) / 100;
       const valAfter = Math.round((valBefore + vatAmt) * 100) / 100;
       updated[idx] = {
         ...target,
         invoicedQuantity: qty,
+        unitPrice: price,
         valueBeforeVat: valBefore,
         totalBeforeVat: valBefore,
         vatAmount: vatAmt,
@@ -210,10 +318,29 @@ export const InvoiceHistory: React.FC<InvoiceHistoryProps> = ({
     let subtotal = 0;
     let totalVat = 0;
     let grandTotal = 0;
-    editLines.forEach((l) => {
-      subtotal += l.valueBeforeVat || 0;
-      totalVat += l.vatAmount || 0;
-      grandTotal += l.valueAfterVat || 0;
+    const finalLines = editLines.map((l) => {
+      const qty = Number(l.invoicedQuantity ?? l.quantityInvoiced ?? l.billedQuantity ?? l.billQty ?? 0);
+      const price = Number(l.unitPrice ?? 0);
+      const vRate = l.vatRate !== undefined && l.vatRate !== null && Number(l.vatRate) > 0 && Number(l.vatRate) <= 1 ? Number(l.vatRate) : 0.18;
+      const valBefore = (l.valueBeforeVat && Number(l.valueBeforeVat) > 0) ? Number(l.valueBeforeVat) : Math.round(qty * price * 100) / 100;
+      const vatAmt = (l.vatAmount && Number(l.vatAmount) > 0 && Number(l.vatAmount) <= valBefore * 0.35)
+        ? Number(l.vatAmount)
+        : Math.round(valBefore * vRate * 100) / 100;
+      const valAfter = Math.round((valBefore + vatAmt) * 100) / 100;
+      subtotal += valBefore;
+      totalVat += vatAmt;
+      grandTotal += valAfter;
+      return {
+        ...l,
+        invoicedQuantity: qty,
+        unitPrice: price,
+        vatRate: vRate,
+        valueBeforeVat: valBefore,
+        totalBeforeVat: valBefore,
+        vatAmount: vatAmt,
+        valueAfterVat: valAfter,
+        totalAfterVat: valAfter,
+      };
     });
 
     const isCancelled = editFlagStatus === 'CANCELLED';
@@ -225,7 +352,7 @@ export const InvoiceHistory: React.FC<InvoiceHistoryProps> = ({
       invoiceNumber: cleanNum,
       invoiceDate: editInvoiceDate,
       notes: editDeliveryNotes.trim(),
-      lines: editLines,
+      lines: finalLines,
       subtotalBeforeVat: Math.round(subtotal * 100) / 100,
       totalVat: Math.round(totalVat * 100) / 100,
       totalAfterVat: Math.round(grandTotal * 100) / 100,
@@ -302,8 +429,8 @@ export const InvoiceHistory: React.FC<InvoiceHistoryProps> = ({
   } = useTableSortAndFilter<InvoiceRecord>(filteredInvoices, {
     defaultSort: { field: 'invoiceNumber', direction: 'asc' },
     customAccessors: {
-      subtotalBeforeVat: (inv: InvoiceRecord) => inv.subtotalBeforeVat || 0,
-      totalAfterVat: (inv: InvoiceRecord) => inv.totalAfterVat || 0,
+      subtotalBeforeVat: (inv: InvoiceRecord) => getEffectiveInvoiceTotals(inv).subtotal,
+      totalAfterVat: (inv: InvoiceRecord) => getEffectiveInvoiceTotals(inv).total,
       linesCount: (inv: InvoiceRecord) => inv.lines?.length || 0,
     },
   });
@@ -329,9 +456,10 @@ export const InvoiceHistory: React.FC<InvoiceHistoryProps> = ({
         cancelledCount += 1;
         return;
       }
-      subtotal += inv.subtotalBeforeVat || 0;
-      vat += inv.totalVat || 0;
-      grandTotal += inv.totalAfterVat || 0;
+      const eff = getEffectiveInvoiceTotals(inv);
+      subtotal += eff.subtotal;
+      vat += eff.vat;
+      grandTotal += eff.total;
       totalLineItems += inv.lines?.length || 0;
     });
 
@@ -374,16 +502,9 @@ export const InvoiceHistory: React.FC<InvoiceHistoryProps> = ({
     ];
     const rows = filteredInvoices.map((inv, idx) => {
       const invDate = inv.invoiceDate || (inv as any).date || '';
-      const subtotal = typeof inv.subtotalBeforeVat === 'number' && inv.subtotalBeforeVat > 0
-        ? inv.subtotalBeforeVat
-        : typeof (inv as any).subtotal === 'number'
-          ? (inv as any).subtotal
-          : 0;
-      const total = typeof inv.totalAfterVat === 'number' && inv.totalAfterVat > 0
-        ? inv.totalAfterVat
-        : typeof (inv as any).totalAmount === 'number'
-          ? (inv as any).totalAmount
-          : subtotal;
+      const eff = getEffectiveInvoiceTotals(inv);
+      const subtotal = eff.subtotal;
+      const total = eff.total;
 
       return [
         idx + 1,
@@ -430,6 +551,18 @@ export const InvoiceHistory: React.FC<InvoiceHistoryProps> = ({
             >
               <Upload className="w-3.5 h-3.5" />
               Load Existing Database
+            </button>
+          )}
+
+          {onRecalculateTotals && (
+            <button
+              onClick={onRecalculateTotals}
+              type="button"
+              className="px-3.5 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-semibold inline-flex items-center gap-1.5 transition-colors cursor-pointer shadow-xs"
+              title="Push calculation & refresh: calculate total = (Bill Qty * Unit Price) + VAT across all invoices and update database"
+            >
+              <Calculator className="w-3.5 h-3.5" />
+              Auto-Calculate & Refresh Totals
             </button>
           )}
 
@@ -722,10 +855,10 @@ export const InvoiceHistory: React.FC<InvoiceHistoryProps> = ({
                         </span>
                       </td>
                       <td className="py-3 px-3 text-right text-slate-600">
-                        TZS {formatCurrency(inv.subtotalBeforeVat || 0)}
+                        TZS {formatCurrency(getEffectiveInvoiceTotals(inv).subtotal)}
                       </td>
                       <td className="py-3 px-3 text-right font-bold text-emerald-700 text-sm">
-                        TZS {formatCurrency(inv.totalAfterVat || 0)}
+                        TZS {formatCurrency(getEffectiveInvoiceTotals(inv).total)}
                       </td>
                       <td className="py-3 px-3 text-center whitespace-nowrap">
                         <div className="flex items-center justify-center gap-1.5">
@@ -863,9 +996,28 @@ export const InvoiceHistory: React.FC<InvoiceHistoryProps> = ({
                                       </tr>
                                     ) : (
                                       inv.lines.map((line, lIdx) => {
-                                        const valBefore = line.valueBeforeVat || (line.invoicedQuantity * line.unitPrice);
-                                        const vat = line.vatAmount || (valBefore * (line.vatRate ?? 0.18));
-                                        const total = line.valueAfterVat || (valBefore + vat);
+                                        const qty = parseCleanNumber(line.invoicedQuantity ?? line.quantityInvoiced ?? 0);
+                                        const price = parseCleanNumber(line.unitPrice ?? 0);
+                                        const vRate =
+                                          line.vatRate !== undefined && line.vatRate !== null && Number(line.vatRate) > 0 && Number(line.vatRate) <= 1
+                                            ? Number(line.vatRate)
+                                            : 0.18;
+                                        const valBefore =
+                                          qty > 0 && price > 0
+                                            ? Math.round(qty * price * 100) / 100
+                                            : parseCleanNumber(line.valueBeforeVat) > 0
+                                              ? parseCleanNumber(line.valueBeforeVat)
+                                              : Math.round(qty * price * 100) / 100;
+                                        const explicitVat = parseCleanNumber(line.vatAmount);
+                                        const vat =
+                                          explicitVat > 0 && explicitVat <= valBefore * 0.35
+                                            ? explicitVat
+                                            : Math.round(valBefore * vRate * 100) / 100;
+                                        const explicitTotal = parseCleanNumber(line.valueAfterVat);
+                                        const total =
+                                          explicitTotal > 0 && Math.abs(explicitTotal - (valBefore + vat)) <= 1
+                                            ? explicitTotal
+                                            : Math.round((valBefore + vat) * 100) / 100;
                                         return (
                                           <tr key={line.id || lIdx} className="hover:bg-slate-50/70">
                                             <td className="py-2 px-3 text-center text-slate-400 font-mono text-[11px]">{lIdx + 1}</td>
@@ -918,13 +1070,13 @@ export const InvoiceHistory: React.FC<InvoiceHistoryProps> = ({
                                       </td>
                                       <td className="py-2 px-3"></td>
                                       <td className="py-2 px-3 text-right font-mono text-slate-700">
-                                        TZS {formatCurrency(inv.subtotalBeforeVat || 0)}
+                                        TZS {formatCurrency(getEffectiveInvoiceTotals(inv).subtotal)}
                                       </td>
                                       <td className="py-2 px-3 text-right font-mono text-slate-600">
-                                        TZS {formatCurrency(inv.totalVat || 0)}
+                                        TZS {formatCurrency(getEffectiveInvoiceTotals(inv).vat)}
                                       </td>
                                       <td className="py-2 px-3 text-right font-mono text-emerald-700 text-xs">
-                                        TZS {formatCurrency(inv.totalAfterVat || 0)}
+                                        TZS {formatCurrency(getEffectiveInvoiceTotals(inv).total)}
                                       </td>
                                       <td className="py-2 px-3"></td>
                                       {canEdit && <td className="py-2 px-3"></td>}
@@ -1220,15 +1372,32 @@ export const InvoiceHistory: React.FC<InvoiceHistoryProps> = ({
                                 className="w-24 px-2 py-1 bg-amber-50/60 border border-amber-300 focus:bg-white focus:border-blue-500 rounded text-right font-mono font-bold text-slate-900 focus:outline-none focus:ring-1 focus:ring-blue-500"
                               />
                             </td>
-                            <td className="py-2 px-3 text-right font-mono text-slate-700">
-                              TZS {formatCurrency(line.valueBeforeVat || 0)}
-                            </td>
-                            <td className="py-2 px-3 text-right font-mono text-slate-600">
-                              TZS {formatCurrency(line.vatAmount || 0)}
-                            </td>
-                            <td className="py-2 px-3 text-right font-mono font-bold text-emerald-700">
-                              TZS {formatCurrency(line.valueAfterVat || 0)}
-                            </td>
+                            {(() => {
+                              const qty = parseCleanNumber(line.invoicedQuantity ?? 0);
+                              const price = parseCleanNumber(line.unitPrice ?? 0);
+                              const vRate = line.vatRate !== undefined && line.vatRate !== null && Number(line.vatRate) > 0 && Number(line.vatRate) <= 1 ? Number(line.vatRate) : 0.18;
+                              const vb = (qty > 0 && price > 0)
+                                ? Math.round(qty * price * 100) / 100
+                                : (parseCleanNumber(line.valueBeforeVat) || Math.round(qty * price * 100) / 100);
+                              const explicitVat = parseCleanNumber(line.vatAmount);
+                              const va = (explicitVat > 0 && explicitVat <= vb * 0.35)
+                                ? explicitVat
+                                : Math.round(vb * vRate * 100) / 100;
+                              const lineTot = Math.round((vb + va) * 100) / 100;
+                              return (
+                                <>
+                                  <td className="py-2 px-3 text-right font-mono text-slate-700">
+                                    TZS {formatCurrency(vb)}
+                                  </td>
+                                  <td className="py-2 px-3 text-right font-mono text-slate-600">
+                                    TZS {formatCurrency(va)}
+                                  </td>
+                                  <td className="py-2 px-3 text-right font-mono font-bold text-emerald-700">
+                                    TZS {formatCurrency(lineTot)}
+                                  </td>
+                                </>
+                              );
+                            })()}
                             {isAdminUser(currentUser) && (
                               <td className="py-1.5 px-3 text-center">
                                 <button

@@ -59,9 +59,11 @@ export interface InvoiceLineItem {
   unitCost: number;
   unitPrice: number;
   valueBeforeVat: number;
+  totalBeforeVat?: number;
   vatRate: number;
   vatAmount: number;
   valueAfterVat: number;
+  totalAfterVat?: number;
   lineTotal?: number;
   isSelected: boolean;
   comment?: string; // Line-level comment (default "Okay")
@@ -125,9 +127,11 @@ export interface DeliveryNoteLineItem {
   unitCost?: number;
   unitPrice: number;
   valueBeforeVat: number;
+  totalBeforeVat?: number;
   vatRate: number;
   vatAmount: number;
   valueAfterVat: number;
+  totalDeliveredValue?: number;
   isSelected?: boolean;
   comment?: string;
   hasIssue?: boolean;

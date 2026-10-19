@@ -36,6 +36,7 @@ import {
 import { canDeleteData } from '../utils/authService';
 import { naturalCompare } from '../utils/naturalSort';
 import { PermanentDeleteModal } from './PermanentDeleteModal';
+import { BatchDeletePOsModal } from './BatchDeletePOsModal';
 import { TablePagination } from './TablePagination';
 
 interface POManagerProps {
@@ -59,6 +60,7 @@ interface POManagerProps {
   onUpdatePOLine?: (updatedLine: POLineItem) => void;
   onDeletePOLine?: (lineId: string) => void;
   onDeletePO?: (poNumber: string) => void;
+  onDeleteBatchPOs?: (poNumbers: string[]) => void;
 }
 
 interface CustomerPOGroup {
@@ -98,6 +100,7 @@ export const POManager: React.FC<POManagerProps> = ({
   onUpdatePOLine,
   onDeletePOLine,
   onDeletePO,
+  onDeleteBatchPOs,
 }) => {
   const handleUpload = onUploadFile || onUploadExcel || (() => {});
   const handleSelectInvoicePO = onSelectPOForInvoice || onCreateInvoiceForPO || (() => {});
@@ -108,6 +111,8 @@ export const POManager: React.FC<POManagerProps> = ({
   const [poPendingDelete, setPoPendingDelete] = useState<PurchaseOrderGroup | null>(null);
   const [poLinePendingDelete, setPoLinePendingDelete] = useState<POLineItem | null>(null);
   const [isClearAllPOsModalOpen, setIsClearAllPOsModalOpen] = useState(false);
+  const [selectedPoNumbers, setSelectedPoNumbers] = useState<Set<string>>(new Set());
+  const [isBatchDeleteModalOpen, setIsBatchDeleteModalOpen] = useState(false);
 
   const [searchTerm, setSearchTerm] = useState(initialSearchTerm || '');
   const [debouncedSearchTerm, setDebouncedSearchTerm] = useState(initialSearchTerm || '');
@@ -290,6 +295,56 @@ export const POManager: React.FC<POManagerProps> = ({
     const start = (groupPage - 1) * groupPageSize;
     return sortedAndFilteredGroups.slice(start, start + groupPageSize);
   }, [sortedAndFilteredGroups, groupPage, groupPageSize]);
+
+  // Batch PO selection helpers
+  const selectedPoGroups = useMemo(() => {
+    return poGroups.filter((g) => selectedPoNumbers.has(g.poNumber));
+  }, [poGroups, selectedPoNumbers]);
+
+  const selectedTotalValue = useMemo(() => {
+    return selectedPoGroups.reduce((acc, g) => acc + (g.totalValueAfterVat || 0), 0);
+  }, [selectedPoGroups]);
+
+  const handleToggleSelectPO = (poNumber: string) => {
+    setSelectedPoNumbers((prev) => {
+      const next = new Set(prev);
+      if (next.has(poNumber)) {
+        next.delete(poNumber);
+      } else {
+        next.add(poNumber);
+      }
+      return next;
+    });
+  };
+
+  const isAllCurrentPageSelected = useMemo(() => {
+    if (paginatedGroups.length === 0) return false;
+    return paginatedGroups.every((g) => selectedPoNumbers.has(g.poNumber));
+  }, [paginatedGroups, selectedPoNumbers]);
+
+  const handleToggleSelectAllPage = () => {
+    setSelectedPoNumbers((prev) => {
+      const next = new Set(prev);
+      if (isAllCurrentPageSelected) {
+        paginatedGroups.forEach((g) => next.delete(g.poNumber));
+      } else {
+        paginatedGroups.forEach((g) => next.add(g.poNumber));
+      }
+      return next;
+    });
+  };
+
+  const handleSelectAllFiltered = () => {
+    setSelectedPoNumbers((prev) => {
+      const next = new Set(prev);
+      sortedAndFilteredGroups.forEach((g) => next.add(g.poNumber));
+      return next;
+    });
+  };
+
+  const handleClearSelection = () => {
+    setSelectedPoNumbers(new Set());
+  };
 
   const paginatedLines = useMemo(() => {
     const start = (linePage - 1) * linePageSize;
@@ -1343,6 +1398,15 @@ export const POManager: React.FC<POManagerProps> = ({
             <table className="w-full text-left text-xs border-collapse">
               <thead className="bg-slate-900 text-white font-semibold uppercase text-[11px] tracking-wider sticky top-0 z-20 shadow-xs">
                 <tr>
+                  <th className="py-2.5 px-2 w-9 text-center sticky top-0 bg-slate-900">
+                    <input
+                      type="checkbox"
+                      checked={isAllCurrentPageSelected}
+                      onChange={handleToggleSelectAllPage}
+                      className="w-3.5 h-3.5 rounded text-blue-600 focus:ring-0 cursor-pointer accent-blue-600"
+                      title={isAllCurrentPageSelected ? 'Deselect all on this page' : 'Select all on this page'}
+                    />
+                  </th>
                   <th className="py-2.5 px-2 w-10 text-center sticky top-0 bg-slate-900">#</th>
                   <th className="py-2.5 px-3 sticky top-0 bg-slate-900">
                     <TableColumnHeader
@@ -1434,7 +1498,7 @@ export const POManager: React.FC<POManagerProps> = ({
               <tbody className="divide-y divide-slate-200">
                 {sortedAndFilteredGroups.length === 0 ? (
                   <tr>
-                    <td colSpan={10} className="py-12 text-center text-slate-400">
+                    <td colSpan={11} className="py-12 text-center text-slate-400">
                       <AlertCircle className="w-8 h-8 mx-auto text-slate-300 mb-2" />
                       No Purchase Orders found matching current search or filters.
                     </td>
@@ -1445,15 +1509,30 @@ export const POManager: React.FC<POManagerProps> = ({
                     const percent = grp.totalValueAfterVat > 0
                       ? Math.round((grp.invoicedValueAfterVat / grp.totalValueAfterVat) * 100)
                       : 0;
+                    const isSelected = selectedPoNumbers.has(grp.poNumber);
 
                     return (
                       <React.Fragment key={grp.poNumber}>
                         {/* Parent PO Row */}
                         <tr
                           className={`transition-colors hover:bg-blue-50/60 ${
-                            isExpanded ? 'bg-blue-50/40 font-medium' : 'bg-white'
+                            isSelected
+                              ? 'bg-blue-50/80 font-medium'
+                              : isExpanded
+                              ? 'bg-blue-50/40 font-medium'
+                              : 'bg-white'
                           }`}
                         >
+                          {/* Selection Checkbox */}
+                          <td className="py-3 px-2 text-center" onClick={(e) => e.stopPropagation()}>
+                            <input
+                              type="checkbox"
+                              checked={isSelected}
+                              onChange={() => handleToggleSelectPO(grp.poNumber)}
+                              className="w-3.5 h-3.5 rounded text-blue-600 focus:ring-0 cursor-pointer accent-blue-600"
+                            />
+                          </td>
+
                           {/* Drilldown Chevron */}
                           <td className="py-3 px-2 text-center">
                             <button
@@ -1613,7 +1692,7 @@ export const POManager: React.FC<POManagerProps> = ({
                         {/* Drilled Lines Child Table Row */}
                         {isExpanded && (
                           <tr className="bg-slate-50/70 border-y border-blue-200">
-                            <td colSpan={10} className="p-4 pl-10">
+                            <td colSpan={11} className="p-4 pl-10">
                               <div className="bg-white rounded-xl border border-blue-200 shadow-sm overflow-hidden">
                                 {/* Drill Header */}
                                 <div className="p-3 bg-blue-900 text-white flex flex-wrap items-center justify-between gap-2">
@@ -2698,6 +2777,69 @@ export const POManager: React.FC<POManagerProps> = ({
           </div>
         </div>
       )}
+
+      {/* Floating Batch Action Bar for Selected Purchase Orders */}
+      {selectedPoNumbers.size > 0 && (
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-40 bg-slate-900/95 backdrop-blur-md text-white px-5 py-3 rounded-2xl shadow-2xl border border-slate-700 flex flex-wrap items-center justify-between gap-4 animate-in slide-in-from-bottom-5 duration-200">
+          <div className="flex items-center gap-2.5">
+            <span className="w-6 h-6 rounded-full bg-blue-600 text-white text-xs font-bold flex items-center justify-center shadow-xs">
+              {selectedPoNumbers.size}
+            </span>
+            <span className="font-semibold text-xs sm:text-sm">
+              Purchase Orders selected
+            </span>
+            <span className="text-slate-400 text-xs hidden md:inline">
+              (Value: <strong className="text-emerald-400 font-mono">TZS {formatCurrency(selectedTotalValue)}</strong>)
+            </span>
+          </div>
+
+          <div className="flex items-center gap-2">
+            {selectedPoNumbers.size < sortedAndFilteredGroups.length && (
+              <button
+                type="button"
+                onClick={handleSelectAllFiltered}
+                className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium transition-colors cursor-pointer"
+              >
+                Select All ({sortedAndFilteredGroups.length})
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={handleClearSelection}
+              className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium transition-colors cursor-pointer"
+            >
+              Deselect All
+            </button>
+            {isAdmin && (
+              <button
+                type="button"
+                onClick={() => setIsBatchDeleteModalOpen(true)}
+                className="px-4 py-1.5 rounded-lg bg-red-600 hover:bg-red-500 text-white text-xs font-bold inline-flex items-center gap-1.5 transition-colors shadow-sm cursor-pointer"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                Delete Selected ({selectedPoNumbers.size})
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Batch Delete Confirmation Modal */}
+      <BatchDeletePOsModal
+        isOpen={isBatchDeleteModalOpen}
+        onClose={() => setIsBatchDeleteModalOpen(false)}
+        onConfirm={() => {
+          const poNums = Array.from(selectedPoNumbers);
+          if (onDeleteBatchPOs) {
+            onDeleteBatchPOs(poNums);
+          } else if (onDeletePO) {
+            poNums.forEach((po) => onDeletePO(po));
+          }
+          handleClearSelection();
+          setIsBatchDeleteModalOpen(false);
+        }}
+        selectedPoGroups={selectedPoGroups}
+      />
     </div>
   );
 };

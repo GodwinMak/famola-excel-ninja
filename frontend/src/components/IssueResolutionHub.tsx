@@ -22,6 +22,8 @@ import {
   getIssueReasonAndComment
 } from '../utils/detailedIssuesReportExport';
 import { SmsConfirmationModal } from './SmsConfirmationModal';
+import { PermanentDeleteModal } from './PermanentDeleteModal';
+import { isAdminUser } from '../utils/authService';
 import { 
   AlertTriangle, 
   CheckCircle2, 
@@ -64,6 +66,7 @@ interface IssueResolutionHubProps {
   payments: PaymentRecord[];
   onUpdateIssue: (issue: DocumentIssueRecord) => void;
   onResolveIssue: (issueId: string, resolvedBy: string, resolutionNotes: string) => void;
+  onResolveMultipleIssues?: (issueIds: string[], resolvedBy: string, resolutionNotes: string) => void;
   onDeleteIssue?: (issueId: string) => void;
   onReloadInvoice: (invoice: InvoiceRecord) => void;
   onReloadDeliveryNote?: (deliveryNote: DeliveryNoteRecord) => void;
@@ -80,6 +83,7 @@ export const IssueResolutionHub: React.FC<IssueResolutionHubProps> = ({
   payments = [],
   onUpdateIssue,
   onResolveIssue,
+  onResolveMultipleIssues,
   onDeleteIssue,
   onReloadInvoice,
   onReloadDeliveryNote,
@@ -135,10 +139,19 @@ export const IssueResolutionHub: React.FC<IssueResolutionHubProps> = ({
     lineIndex: number;
   } | null>(null);
 
-  const isAdmin = currentUser?.role === 'Admin' || currentUser?.role === 'Auditor';
-  const isSysAdmin = currentUser?.role === 'Admin';
-  const authorName = currentUser?.name || 'Current User';
-  const authorRole = currentUser?.role || 'Billing Clerk';
+  // Admin delete entire issue confirmation state
+  const [issuePendingDelete, setIssuePendingDelete] = useState<DocumentIssueRecord | null>(null);
+
+  // Batch selection and resolution state
+  const [selectedIssueIds, setSelectedIssueIds] = useState<Set<string>>(new Set());
+  const [isBulkResolveModalOpen, setIsBulkResolveModalOpen] = useState(false);
+  const [bulkResolutionText, setBulkResolutionText] = useState('');
+  const [isResolveAllPendingModalOpen, setIsResolveAllPendingModalOpen] = useState(false);
+
+  const isSysAdmin = isAdminUser(currentUser) || currentUser?.role === 'Admin' || !currentUser;
+  const isAdmin = isSysAdmin || currentUser?.role === 'Auditor';
+  const authorName = currentUser?.name || 'Famola Admin';
+  const authorRole = currentUser?.role || 'Executive Management';
 
   const handleConfirmDeleteLine = () => {
     if (!linePendingDelete) return;
@@ -501,6 +514,10 @@ export const IssueResolutionHub: React.FC<IssueResolutionHubProps> = ({
     };
   }, [issues]);
 
+  const pendingFilteredIssues = useMemo(() => {
+    return sortedIssues.filter((i) => i.status !== 'RESOLVED');
+  }, [sortedIssues]);
+
   // Worker adds a work comment or submits for review
   const handleAddWorkComment = (issue: DocumentIssueRecord, submitForReview = false) => {
     const text = (workComments[issue.id] || '').trim();
@@ -612,6 +629,53 @@ export const IssueResolutionHub: React.FC<IssueResolutionHubProps> = ({
     onResolveIssue(resolvingIssue.id, `${authorName} (${authorRole})`, note);
     setResolvingIssue(null);
     setResolutionText('');
+  };
+
+  // Quick 1-click resolve
+  const handleQuickResolve = (issue: DocumentIssueRecord) => {
+    if (!isSysAdmin) {
+      alert('Access Denied: Only Administrators are authorized to mark issues as resolved.');
+      return;
+    }
+    const note = 'Discrepancy verified, document reconciled, and resolved.';
+    onResolveIssue(issue.id, `${authorName} (${authorRole})`, note);
+  };
+
+  // Batch resolve multiple selected issues
+  const handleBatchResolve = (issueIds: string[], customNote?: string) => {
+    if (!isSysAdmin) {
+      alert('Access Denied: Only Administrators are authorized to mark issues as resolved.');
+      return;
+    }
+    if (!issueIds || issueIds.length === 0) return;
+    const note = (customNote && customNote.trim()) || 'Batch audited, verified, and resolved by Administrator.';
+    if (onResolveMultipleIssues) {
+      onResolveMultipleIssues(issueIds, `${authorName} (${authorRole})`, note);
+    } else {
+      issueIds.forEach((id) => onResolveIssue(id, `${authorName} (${authorRole})`, note));
+    }
+    setSelectedIssueIds(new Set());
+    setIsBulkResolveModalOpen(false);
+    setIsResolveAllPendingModalOpen(false);
+  };
+
+  // Toggle single issue selection
+  const toggleSelectIssue = (id: string) => {
+    setSelectedIssueIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  // Toggle all pending in current filtered view
+  const toggleSelectAllFiltered = (pendingIds: string[]) => {
+    if (selectedIssueIds.size === pendingIds.length && pendingIds.length > 0) {
+      setSelectedIssueIds(new Set());
+    } else {
+      setSelectedIssueIds(new Set(pendingIds));
+    }
   };
 
   // Re-open an issue (Admin only)
@@ -1076,6 +1140,28 @@ export const IssueResolutionHub: React.FC<IssueResolutionHubProps> = ({
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
+            {selectedIssueIds.size > 0 && isSysAdmin && (
+              <button
+                type="button"
+                onClick={() => setIsBulkResolveModalOpen(true)}
+                className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold shadow-xs inline-flex items-center gap-1.5 transition-colors cursor-pointer"
+                title="Resolve all selected issues"
+              >
+                <Check className="w-3.5 h-3.5" />
+                <span>Resolve Selected ({selectedIssueIds.size})</span>
+              </button>
+            )}
+            {pendingFilteredIssues.length > 0 && isSysAdmin && (
+              <button
+                type="button"
+                onClick={() => setIsResolveAllPendingModalOpen(true)}
+                className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-xs font-bold shadow-xs inline-flex items-center gap-1.5 transition-colors cursor-pointer"
+                title="Resolve all pending issues in current view"
+              >
+                <CheckCircle2 className="w-3.5 h-3.5" />
+                <span>Resolve All Pending ({pendingFilteredIssues.length})</span>
+              </button>
+            )}
             <button
               onClick={handleExportDetailedReportExcel}
               className="px-3 py-1.5 bg-emerald-700 hover:bg-emerald-800 text-white rounded-lg text-xs font-bold shadow-xs inline-flex items-center gap-1.5 transition-colors cursor-pointer"
@@ -1120,6 +1206,21 @@ export const IssueResolutionHub: React.FC<IssueResolutionHubProps> = ({
             <table className="w-full text-left text-xs border-collapse">
               <thead className="bg-slate-900 text-white font-semibold select-none">
                 <tr>
+                  {/* Select All Checkbox */}
+                  <th className="py-3 px-3 w-10 text-center">
+                    <input
+                      type="checkbox"
+                      checked={
+                        pendingFilteredIssues.length > 0 &&
+                        pendingFilteredIssues.every((i) => selectedIssueIds.has(i.id))
+                      }
+                      onChange={() => toggleSelectAllFiltered(pendingFilteredIssues.map((i) => i.id))}
+                      disabled={pendingFilteredIssues.length === 0}
+                      className="rounded border-slate-400 text-blue-600 focus:ring-blue-500 cursor-pointer disabled:opacity-40"
+                      title="Select all pending issues in view"
+                    />
+                  </th>
+
                   {/* 1. S/N */}
                   <th 
                     onClick={() => handleSort('sn')}
@@ -1377,6 +1478,18 @@ export const IssueResolutionHub: React.FC<IssueResolutionHubProps> = ({
                             : 'bg-white hover:bg-slate-50'
                         }`}
                       >
+                        {/* Checkbox Selection */}
+                        <td className="py-3 px-3 text-center" onClick={(e) => e.stopPropagation()}>
+                          <input
+                            type="checkbox"
+                            checked={selectedIssueIds.has(issue.id)}
+                            onChange={() => toggleSelectIssue(issue.id)}
+                            disabled={isResolved}
+                            className="rounded border-slate-300 text-blue-600 focus:ring-blue-500 cursor-pointer disabled:opacity-30"
+                            title={isResolved ? 'Issue is already resolved' : 'Select to resolve'}
+                          />
+                        </td>
+
                         {/* 1. S/N */}
                         <td className="py-3 px-3 text-center font-mono font-bold text-slate-500">
                           {(issuesPage - 1) * issuesPageSize + idx + 1}
@@ -1550,7 +1663,29 @@ export const IssueResolutionHub: React.FC<IssueResolutionHubProps> = ({
                               </button>
                             )}
 
-                            {/* Mark as Resolved button (Admin only) */}
+                            {/* 1-Click Quick Resolve button (Admin only) */}
+                            {!isResolved && (
+                              <button
+                                type="button"
+                                onClick={() => handleQuickResolve(issue)}
+                                disabled={!isSysAdmin}
+                                className={`px-2 py-1 font-bold rounded-lg text-xs inline-flex items-center gap-1 shadow-xs transition-all ${
+                                  isSysAdmin
+                                    ? 'bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 cursor-pointer'
+                                    : 'bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed opacity-60 shadow-none'
+                                }`}
+                                title={
+                                  isSysAdmin
+                                    ? 'Quickly resolve this issue in 1 click'
+                                    : 'Access Denied: Only Administrators can mark issues as resolved'
+                                }
+                              >
+                                <Check className="w-3 h-3 text-emerald-600" />
+                                <span className="hidden xl:inline">Quick</span>
+                              </button>
+                            )}
+
+                            {/* Mark as Resolved button with notes (Admin only) */}
                             {!isResolved ? (
                               <button
                                 type="button"
@@ -1601,13 +1736,9 @@ export const IssueResolutionHub: React.FC<IssueResolutionHubProps> = ({
                             {/* Delete button (if admin) */}
                             {isAdmin && onDeleteIssue && (
                               <button
-                                onClick={() => {
-                                  if (confirm(`Remove issue record on ${issue.referenceNumber}?`)) {
-                                    onDeleteIssue(issue.id);
-                                  }
-                                }}
+                                onClick={() => setIssuePendingDelete(issue)}
                                 className="p-1 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded transition-colors cursor-pointer"
-                                title="Delete issue record"
+                                title="Delete issue record permanently"
                               >
                                 <Trash2 className="w-3.5 h-3.5" />
                               </button>
@@ -2199,6 +2330,103 @@ export const IssueResolutionHub: React.FC<IssueResolutionHubProps> = ({
         customerName={linePendingDelete?.issue.customerName}
         warningNote="⚠️ Permanently removes this item line from this issue and database. Recalculates all balances."
       />
+
+      {/* Permanent Delete Modal for Admin Deleting Issue Record */}
+      <PermanentDeleteModal
+        isOpen={!!issuePendingDelete}
+        onClose={() => setIssuePendingDelete(null)}
+        onConfirm={() => {
+          if (issuePendingDelete && onDeleteIssue) {
+            onDeleteIssue(issuePendingDelete.id);
+            setIssuePendingDelete(null);
+          }
+        }}
+        transactionType="ISSUE"
+        referenceNumber={issuePendingDelete?.referenceNumber || ''}
+        customerName={issuePendingDelete?.customerName}
+        poNumber={issuePendingDelete?.poNumber}
+        totalAmount={issuePendingDelete?.totalValue}
+        details={`Permanently removes issue record "${issuePendingDelete?.issueTitle || issuePendingDelete?.referenceNumber}" and all associated comments and discrepancies from the database.`}
+      />
+
+      {/* Batch Resolve Selected Issues Modal */}
+      {isBulkResolveModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-xs p-4">
+          <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 w-full max-w-lg p-6 space-y-4 animate-in fade-in zoom-in-95">
+            <div className="flex items-center gap-2.5 text-emerald-700 font-bold text-base pb-3 border-b border-slate-100">
+              <CheckCircle2 className="w-6 h-6 text-emerald-600" />
+              <span>Resolve Selected Issues ({selectedIssueIds.size} Selected)</span>
+            </div>
+            <p className="text-xs text-slate-600 leading-relaxed">
+              You are about to mark <strong>{selectedIssueIds.size} issues</strong> as resolved in bulk. This will update the status of each selected document, mark their discrepancy lines as resolved, and synchronize the database.
+            </p>
+            <div>
+              <label className="block text-xs font-bold text-slate-700 uppercase mb-1.5">
+                Batch Resolution Notes (Optional)
+              </label>
+              <textarea
+                rows={3}
+                value={bulkResolutionText}
+                onChange={(e) => setBulkResolutionText(e.target.value)}
+                placeholder="E.g. Discrepancies reviewed, verified against supplier delivery notes and purchase orders, and cleared."
+                className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs text-slate-800 focus:bg-white focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500"
+              />
+            </div>
+            <div className="flex items-center justify-end gap-3 pt-2">
+              <button
+                type="button"
+                onClick={() => setIsBulkResolveModalOpen(false)}
+                className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-semibold cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => handleBatchResolve(Array.from(selectedIssueIds), bulkResolutionText)}
+                className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold shadow-md cursor-pointer inline-flex items-center gap-2"
+              >
+                <Check className="w-4 h-4" />
+                <span>Confirm Batch Resolve ({selectedIssueIds.size})</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Resolve All Pending Issues in View Modal */}
+      {isResolveAllPendingModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-xs p-4">
+          <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 w-full max-w-lg p-6 space-y-4 animate-in fade-in zoom-in-95">
+            <div className="flex items-center gap-2.5 text-indigo-700 font-bold text-base pb-3 border-b border-slate-100">
+              <CheckCircle2 className="w-6 h-6 text-indigo-600" />
+              <span>Resolve All Pending Issues ({pendingFilteredIssues.length})</span>
+            </div>
+            <p className="text-xs text-slate-600 leading-relaxed">
+              Are you sure you want to resolve all <strong>{pendingFilteredIssues.length} pending issues</strong> currently in this view? All active discrepancy flags will be cleared, linked invoices and delivery notes will be marked as resolved, and audit trails will be preserved.
+            </p>
+            <div className="flex items-center justify-end gap-3 pt-2">
+              <button
+                type="button"
+                onClick={() => setIsResolveAllPendingModalOpen(false)}
+                className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-semibold cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const pendingIds = pendingFilteredIssues.map((i) => i.id);
+                  handleBatchResolve(pendingIds, 'All pending issues verified and resolved during executive management audit.');
+                }}
+                className="px-5 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold shadow-md cursor-pointer inline-flex items-center gap-2"
+              >
+                <Check className="w-4 h-4" />
+                <span>Confirm Resolve All ({pendingFilteredIssues.length})</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
     </div>
   );

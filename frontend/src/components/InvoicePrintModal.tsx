@@ -1,6 +1,6 @@
 import React from 'react';
 import { InvoiceRecord } from '../types';
-import { formatCurrency } from '../utils/storage';
+import { formatCurrency, parseCleanNumber } from '../utils/storage';
 import { exportTableToExcel, exportTableToPdf } from '../utils/tableExport';
 import { TableExportToolbar } from './TableExportToolbar';
 import { X, Printer, Download, Building2, CheckCircle } from 'lucide-react';
@@ -181,10 +181,30 @@ export const InvoicePrintModal: React.FC<InvoicePrintModalProps> = ({
                         <td className="py-3 px-3 font-semibold text-slate-900">{line.itemDescription}</td>
                         <td className="py-3 px-2 text-center font-mono text-slate-600">{line.unitOfMeasure}</td>
                         <td className="py-3 px-3 text-right font-bold text-slate-900">{line.invoicedQuantity}</td>
-                        <td className="py-3 px-3 text-right text-slate-700">TZS {formatCurrency(line.unitPrice)}</td>
-                        <td className="py-3 px-3 text-right text-slate-800">TZS {formatCurrency(line.valueBeforeVat)}</td>
-                        <td className="py-3 px-3 text-right text-slate-500">TZS {formatCurrency(line.vatAmount)}</td>
-                        <td className="py-3 px-3 text-right font-bold text-slate-900">TZS {formatCurrency(line.valueAfterVat)}</td>
+                        {(() => {
+                          const qty = parseCleanNumber(line.invoicedQuantity ?? 0);
+                          const price = parseCleanNumber(line.unitPrice ?? 0);
+                          const vRate =
+                            line.vatRate !== undefined && line.vatRate !== null && Number(line.vatRate) > 0 && Number(line.vatRate) <= 1
+                              ? Number(line.vatRate)
+                              : 0.18;
+                          const vb = (qty > 0 && price > 0)
+                            ? Math.round(qty * price * 100) / 100
+                            : (parseCleanNumber(line.valueBeforeVat) || Math.round(qty * price * 100) / 100);
+                          const explicitVat = parseCleanNumber(line.vatAmount);
+                          const va = (explicitVat > 0 && explicitVat <= vb * 0.35)
+                            ? explicitVat
+                            : Math.round(vb * vRate * 100) / 100;
+                          const lineTot = Math.round((vb + va) * 100) / 100;
+                          return (
+                            <>
+                              <td className="py-3 px-3 text-right text-slate-700">TZS {formatCurrency(price)}</td>
+                              <td className="py-3 px-3 text-right text-slate-800">TZS {formatCurrency(vb)}</td>
+                              <td className="py-3 px-3 text-right text-slate-500">TZS {formatCurrency(va)}</td>
+                              <td className="py-3 px-3 text-right font-bold text-slate-900">TZS {formatCurrency(lineTot)}</td>
+                            </>
+                          );
+                        })()}
                       </tr>
                     ))}
                   </tbody>
@@ -214,20 +234,41 @@ export const InvoicePrintModal: React.FC<InvoicePrintModalProps> = ({
             </div>
 
             {/* Totals Box */}
-            <div className="bg-slate-50 p-5 rounded-xl border border-slate-200 space-y-2.5 text-xs">
-              <div className="flex justify-between text-slate-600">
-                <span>Subtotal (Before VAT):</span>
-                <span className="font-bold text-slate-900">TZS {formatCurrency(invoice.subtotalBeforeVat)}</span>
-              </div>
-              <div className="flex justify-between text-slate-600">
-                <span>Value Added Tax (VAT 18%):</span>
-                <span className="font-bold text-slate-900">TZS {formatCurrency(invoice.totalVat)}</span>
-              </div>
-              <div className="flex justify-between text-base font-extrabold text-slate-900 pt-3 border-t border-slate-300">
-                <span>Total Amount Due:</span>
-                <span className="text-emerald-700 font-mono text-xl">TZS {formatCurrency(invoice.totalAfterVat)}</span>
-              </div>
-            </div>
+            {(() => {
+              const lines = invoice.lines || [];
+              let calcSub = 0;
+              let calcVat = 0;
+              for (const l of lines) {
+                const qty = Number(l.invoicedQuantity ?? 0);
+                const price = Number(l.unitPrice ?? 0);
+                const vRate = l.vatRate !== undefined && l.vatRate !== null && Number(l.vatRate) > 0 && Number(l.vatRate) <= 1 ? Number(l.vatRate) : 0.18;
+                const vb = (l.valueBeforeVat && Number(l.valueBeforeVat) > 0) ? Number(l.valueBeforeVat) : Math.round(qty * price * 100) / 100;
+                const va = (l.vatAmount && Number(l.vatAmount) > 0 && Number(l.vatAmount) <= vb * 0.35) ? Number(l.vatAmount) : Math.round(vb * vRate * 100) / 100;
+                calcSub += vb;
+                calcVat += va;
+              }
+              calcSub = Math.round(calcSub * 100) / 100;
+              calcVat = Math.round(calcVat * 100) / 100;
+              const sub = (invoice.subtotalBeforeVat && invoice.subtotalBeforeVat > 0) ? invoice.subtotalBeforeVat : calcSub;
+              const vt = (invoice.totalVat && invoice.totalVat > 0) ? invoice.totalVat : calcVat;
+              const tot = (invoice.totalAfterVat && invoice.totalAfterVat > 0) ? invoice.totalAfterVat : Math.round((sub + vt) * 100) / 100;
+              return (
+                <div className="bg-slate-50 p-5 rounded-xl border border-slate-200 space-y-2.5 text-xs">
+                  <div className="flex justify-between text-slate-600">
+                    <span>Subtotal (Before VAT):</span>
+                    <span className="font-bold text-slate-900">TZS {formatCurrency(sub)}</span>
+                  </div>
+                  <div className="flex justify-between text-slate-600">
+                    <span>Value Added Tax (VAT 18%):</span>
+                    <span className="font-bold text-slate-900">TZS {formatCurrency(vt)}</span>
+                  </div>
+                  <div className="flex justify-between text-base font-extrabold text-slate-900 pt-3 border-t border-slate-300">
+                    <span>Total Amount Due:</span>
+                    <span className="text-emerald-700 font-mono text-xl">TZS {formatCurrency(tot)}</span>
+                  </div>
+                </div>
+              );
+            })()}
           </div>
 
           {/* Authorized Signature Footer */}

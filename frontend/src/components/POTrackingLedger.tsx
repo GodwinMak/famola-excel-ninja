@@ -1,6 +1,6 @@
 import React, { useState, useMemo } from 'react';
 import { PurchaseOrderGroup, InvoiceRecord, POLineItem, DeliveryNoteRecord } from '../types';
-import { formatCurrency, groupPOsByNumber } from '../utils/storage';
+import { formatCurrency, parseCleanNumber, groupPOsByNumber } from '../utils/storage';
 import { naturalCompare } from '../utils/naturalSort';
 import { exportTableToExcel, exportTableToPdf } from '../utils/tableExport';
 import { TableExportToolbar } from './TableExportToolbar';
@@ -422,7 +422,7 @@ export const POTrackingLedger: React.FC<POTrackingLedgerProps> = ({
                               l.invoicedQuantity || 0,
                               l.remainingQuantity !== undefined ? l.remainingQuantity : l.quantity,
                               formatCurrency(l.unitPrice),
-                              formatCurrency(l.valueAfterVat),
+                              formatCurrency(parseCleanNumber(l.valueAfterVat) || Math.round((parseCleanNumber(l.quantity) * parseCleanNumber(l.unitPrice) * 1.18) * 100) / 100),
                               l.status || 'UNINVOICED',
                             ]);
                             exportTableToExcel(`PO_${grp.poNumber}_Lines`, headers, rows, `po_${grp.poNumber.toLowerCase()}_lines`);
@@ -436,7 +436,7 @@ export const POTrackingLedger: React.FC<POTrackingLedgerProps> = ({
                               l.invoicedQuantity || 0,
                               l.remainingQuantity !== undefined ? l.remainingQuantity : l.quantity,
                               formatCurrency(l.unitPrice),
-                              formatCurrency(l.valueAfterVat),
+                              formatCurrency(parseCleanNumber(l.valueAfterVat) || Math.round((parseCleanNumber(l.quantity) * parseCleanNumber(l.unitPrice) * 1.18) * 100) / 100),
                               l.status || 'UNINVOICED',
                             ]);
                             exportTableToPdf(`PO #${grp.poNumber} - Line Items Breakdown`, headers, rows, {
@@ -473,7 +473,9 @@ export const POTrackingLedger: React.FC<POTrackingLedgerProps> = ({
                                   {l.remainingQuantity !== undefined ? l.remainingQuantity : l.quantity}
                                 </td>
                                 <td className="py-2 px-3 text-right text-slate-600">TZS {formatCurrency(l.unitPrice)}</td>
-                                <td className="py-2 px-3 text-right font-bold text-slate-900">TZS {formatCurrency(l.valueAfterVat)}</td>
+                                <td className="py-2 px-3 text-right font-bold text-slate-900">
+                                  TZS {formatCurrency(parseCleanNumber(l.valueAfterVat) || Math.round((parseCleanNumber(l.quantity) * parseCleanNumber(l.unitPrice) * 1.18) * 100) / 100)}
+                                </td>
                                 <td className="py-2 px-3 text-center">
                                   {l.status === 'FULLY_INVOICED' && (
                                     <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-100 text-emerald-800">
@@ -526,10 +528,21 @@ export const POTrackingLedger: React.FC<POTrackingLedgerProps> = ({
                               </div>
 
                               <div className="flex items-center gap-3">
-                                <div className="text-right">
-                                  <div className="font-bold text-sm text-emerald-700">TZS {formatCurrency(inv.totalAfterVat)}</div>
-                                  <div className="text-[10px] text-slate-400">Incl. VAT</div>
-                                </div>
+                                  <div className="text-right">
+                                    <div className="font-bold text-sm text-emerald-700 font-mono">
+                                      TZS {formatCurrency(
+                                        parseCleanNumber(inv.totalAfterVat) ||
+                                        (inv.lines || []).reduce((sum, l) => {
+                                          const q = parseCleanNumber(l.invoicedQuantity);
+                                          const p = parseCleanNumber(l.unitPrice);
+                                          const vb = (q > 0 && p > 0) ? q * p : parseCleanNumber(l.valueBeforeVat);
+                                          const vt = parseCleanNumber(l.vatAmount) || Math.round(vb * 0.18 * 100) / 100;
+                                          return sum + (parseCleanNumber(l.valueAfterVat) || Math.round((vb + vt) * 100) / 100);
+                                        }, 0)
+                                      )}
+                                    </div>
+                                    <div className="text-[10px] text-slate-400">Incl. VAT</div>
+                                  </div>
                                 {onViewInvoicePrint && (
                                   <button
                                     onClick={() => onViewInvoicePrint(inv)}

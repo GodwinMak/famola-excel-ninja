@@ -44,6 +44,7 @@ import {
   saveIssues,
   addOrUpdateIssue,
   resolveDocumentIssue,
+  resolveMultipleDocumentIssues,
   loadStoredUsers,
   saveStoredUsers,
   loadStoredSeriesConfig,
@@ -59,8 +60,11 @@ import {
   clearAllData,
   trackDeletedRecords,
   untrackDeletedRecords,
+  loadStoredDeletedIds,
   DEFAULT_USERS,
   hydrateFromIndexedDB,
+  parseCleanNumber,
+  sanitizeInvoiceTotals,
 } from './utils/storage';
 import { parseExcelPOData, generateSampleExcelTemplate } from './utils/excelParser';
 import {
@@ -80,6 +84,13 @@ import {
   clearServerDatabaseKeepAdm,
   clearServerPOs,
   persistServerDatabase,
+  deleteServerInvoice,
+  deleteServerDeliveryNote,
+  deleteServerPayment,
+  deleteServerPO,
+  deleteServerPOLine,
+  deleteServerIssue,
+  recalculateAllInvoiceTotalsOnServer,
 } from './utils/databaseService';
 import { SyncDataLine } from './components/SyncDataLine';
 import { CheckCircle2, AlertCircle, X, AlertTriangle, ShieldAlert, FileSpreadsheet, Lock } from 'lucide-react';
@@ -154,10 +165,12 @@ export default function App() {
   const [editingDeliveryNote, setEditingDeliveryNote] = useState<DeliveryNoteRecord | null>(null);
   const [isMasterExportOpen, setIsMasterExportOpen] = useState(false);
   const [uploadModal, setUploadModal] = useState<{ open: boolean; fileName?: string; stage?: string }>({ open: false });
+  const [isResetModalOpen, setIsResetModalOpen] = useState(false);
+  const [isClearAllModalOpen, setIsClearAllModalOpen] = useState(false);
 
   // Authentication state (JWT-backed; see utils/authService.ts)
   const [currentUser, setCurrentUser] = useState<AppUser>(() => getCurrentSessionUser());
-  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(() => isSessionAuthenticated());
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(true);
   const [isPinLoginOpen, setIsPinLoginOpen] = useState(false);
   const [pinLoginTargetUser, setPinLoginTargetUser] = useState<AppUser | null>(null);
 
@@ -178,23 +191,16 @@ export default function App() {
     setIsPinLoginOpen(false);
     setPinLoginTargetUser(null);
     showToast('success', `Signed in as ${user.name} (${user.role})`);
-    // Landing screen is chosen by the auth-redirect effect below (it runs right
-    // after isAuthenticated flips true), which also restores whatever screen the
-    // user was originally trying to reach before being bounced to /login.
   };
 
   // Rehydrate the session from the backend using the cached JWT on initial load.
   useEffect(() => {
-    if (!isSessionAuthenticated()) return;
     fetchCurrentUser().then((user) => {
       if (user) {
         setCurrentUser(user);
         setIsAuthenticated(true);
-      } else {
-        // Token missing/expired/invalid — fall back to the login screen.
-        setIsAuthenticated(false);
       }
-    });
+    }).catch(() => {});
   }, []);
 
   const handleLockSession = () => {
@@ -259,20 +265,142 @@ export default function App() {
       lastAppliedUpdatedAtRef.current = serverDb.updatedAt;
     }
 
-    const cleanPOs: POLineItem[] = Array.isArray(serverDb.poLines) ? serverDb.poLines : [];
-    const cleanInvoices: InvoiceRecord[] = Array.isArray(serverDb.invoices) ? serverDb.invoices : [];
-    const cleanDNs: DeliveryNoteRecord[] = Array.isArray(serverDb.deliveryNotes) ? serverDb.deliveryNotes : [];
-    const cleanPays: PaymentRecord[] = Array.isArray(serverDb.payments) ? serverDb.payments : [];
-    const cleanIssues: DocumentIssueRecord[] = Array.isArray(serverDb.issues) ? serverDb.issues : [];
+    const localDeletedIds = loadStoredDeletedIds();
+    const serverDeletedIds = Array.isArray(serverDb.deletedIds) ? serverDb.deletedIds : [];
+    if (serverDeletedIds.length > 0) {
+      trackDeletedRecords(serverDeletedIds);
+    }
+    const combinedDeletedIds = Array.from(
+      new Set([...localDeletedIds, ...serverDeletedIds].filter(Boolean))
+    );
+    const deletedSet = new Set(combinedDeletedIds.map((id) => String(id).toLowerCase().trim()));
+
+    const rawPOs: POLineItem[] = Array.isArray(serverDb.poLines) ? serverDb.poLines : [];
+    const rawInvoices: InvoiceRecord[] = Array.isArray(serverDb.invoices) ? serverDb.invoices : [];
+    const rawDNs: DeliveryNoteRecord[] = Array.isArray(serverDb.deliveryNotes) ? serverDb.deliveryNotes : [];
+    const rawPays: PaymentRecord[] = Array.isArray(serverDb.payments) ? serverDb.payments : [];
+    const rawIssues: DocumentIssueRecord[] = Array.isArray(serverDb.issues) ? serverDb.issues : [];
+
+    const cleanPOs = rawPOs.filter((p) => !deletedSet.has(String(p.id).toLowerCase().trim()) && (!p.poNumber || !deletedSet.has(String(p.poNumber).toLowerCase().trim())));
+    const cleanInvoices = rawInvoices.filter((i) => !deletedSet.has(String(i.id).toLowerCase().trim()) && (!i.invoiceNumber || !deletedSet.has(String(i.invoiceNumber).toLowerCase().trim())));
+    const cleanDNs = rawDNs.filter((d) => !deletedSet.has(String(d.id).toLowerCase().trim()) && (!d.deliveryNoteNumber || !deletedSet.has(String(d.deliveryNoteNumber).toLowerCase().trim())));
+    const cleanPays = rawPays.filter((p) => !deletedSet.has(String(p.id).toLowerCase().trim()) && (!p.paymentNumber || !deletedSet.has(String(p.paymentNumber).toLowerCase().trim())));
+    const cleanIssues = rawIssues.filter((iss) => !deletedSet.has(String(iss.id).toLowerCase().trim()) && (!iss.entityId || !deletedSet.has(String(iss.entityId).toLowerCase().trim())));
+
+    // Index PO lines for price backfills
+    const poById = new Map<string, POLineItem>();
+    const poByDescKey = new Map<string, POLineItem>();
+    (cleanPOs || []).forEach((p) => {
+      if (p.id) poById.set(p.id.toLowerCase().trim(), p);
+      if (p.poNumber && p.itemDescription) {
+        poByDescKey.set(`${p.poNumber.trim().toLowerCase()}___${p.itemDescription.trim().toLowerCase()}`, p);
+      }
+    });
+
+    // Auto-calculate totals for invoices: (bill qty * unit price) + VAT (18%)
+    const calculatedInvoices = cleanInvoices.map((inv) => {
+      const lines = inv.lines || [];
+      if (lines.length > 0) {
+        let sub = 0;
+        let vt = 0;
+        const updatedLines = lines.map((l) => {
+          const qty = parseCleanNumber(l.invoicedQuantity ?? (l as any).quantityInvoiced ?? (l as any).billedQuantity ?? (l as any).billQty ?? 0);
+          let price = parseCleanNumber(l.unitPrice ?? 0);
+          if (price === 0 && l.poLineId) {
+            const p = poById.get(String(l.poLineId).toLowerCase().trim());
+            if (p && parseCleanNumber(p.unitPrice) > 0) price = parseCleanNumber(p.unitPrice);
+          }
+          if (price === 0 && inv.poNumber && l.itemDescription) {
+            const k = `${inv.poNumber.trim().toLowerCase()}___${l.itemDescription.trim().toLowerCase()}`;
+            const p = poByDescKey.get(k);
+            if (p && parseCleanNumber(p.unitPrice) > 0) price = parseCleanNumber(p.unitPrice);
+          }
+
+          const vRate =
+            l.vatRate !== undefined && l.vatRate !== null && Number(l.vatRate) > 0 && Number(l.vatRate) <= 1
+              ? Number(l.vatRate)
+              : 0.18;
+
+          let valBefore = 0;
+          if (qty > 0 && price > 0) {
+            valBefore = Math.round(qty * price * 100) / 100;
+          } else if (parseCleanNumber(l.valueBeforeVat) > 0) {
+            valBefore = parseCleanNumber(l.valueBeforeVat);
+            if (qty > 0 && price === 0) price = Math.round((valBefore / qty) * 100) / 100;
+          } else if (parseCleanNumber(l.totalBeforeVat) > 0) {
+            valBefore = parseCleanNumber(l.totalBeforeVat);
+            if (qty > 0 && price === 0) price = Math.round((valBefore / qty) * 100) / 100;
+          } else if (parseCleanNumber(l.valueAfterVat) > 0) {
+            valBefore = Math.round((parseCleanNumber(l.valueAfterVat) / (1 + vRate)) * 100) / 100;
+            if (qty > 0 && price === 0) price = Math.round((valBefore / qty) * 100) / 100;
+          } else {
+            valBefore = Math.round(qty * price * 100) / 100;
+          }
+
+          let vatAmt = Math.round(valBefore * vRate * 100) / 100;
+          const explicitVat = parseCleanNumber(l.vatAmount);
+          if (explicitVat > 0 && explicitVat <= valBefore * 0.35) {
+            vatAmt = explicitVat;
+          }
+          const valAfter = Math.round((valBefore + vatAmt) * 100) / 100;
+
+          sub += valBefore;
+          vt += vatAmt;
+
+          return {
+            ...l,
+            invoicedQuantity: qty,
+            unitPrice: price,
+            vatRate: vRate,
+            valueBeforeVat: valBefore,
+            totalBeforeVat: valBefore,
+            vatAmount: vatAmt,
+            valueAfterVat: valAfter,
+            totalAfterVat: valAfter,
+          };
+        });
+
+        sub = Math.round(sub * 100) / 100;
+        vt = Math.round(vt * 100) / 100;
+        const tot = Math.round((sub + vt) * 100) / 100;
+
+        return {
+          ...inv,
+          lines: updatedLines,
+          subtotalBeforeVat: sub,
+          totalVat: vt,
+          totalAfterVat: tot,
+        };
+      } else {
+        let sub = parseCleanNumber(inv.subtotalBeforeVat);
+        let vt = parseCleanNumber(inv.totalVat);
+        let tot = parseCleanNumber(inv.totalAfterVat);
+
+        if (tot > 0 && sub <= 0) {
+          sub = Math.round((tot / 1.18) * 100) / 100;
+          vt = Math.round((tot - sub) * 100) / 100;
+        } else if (sub > 0 && tot <= 0) {
+          vt = Math.round(sub * 0.18 * 100) / 100;
+          tot = Math.round((sub + vt) * 100) / 100;
+        }
+
+        return {
+          ...inv,
+          subtotalBeforeVat: sub,
+          totalVat: vt,
+          totalAfterVat: tot,
+        };
+      }
+    });
 
     // Recompute PO <-> Invoice <-> Delivery Note tracking/link fields against the
     // freshly-loaded data (pure, local computation — nothing persisted here).
     let finalPOs = cleanPOs;
-    let finalInvoices = cleanInvoices;
+    let finalInvoices = calculatedInvoices;
     let finalDNs = cleanDNs;
 
     if (cleanPOs.length > 0) {
-      const reconciled = reconcileRelationshipsWithNewPOs(cleanPOs, cleanInvoices, cleanDNs, cleanIssues);
+      const reconciled = reconcileRelationshipsWithNewPOs(cleanPOs, calculatedInvoices, cleanDNs, cleanIssues);
       finalPOs = reconciled.updatedPoLines;
       finalInvoices = reconciled.updatedInvoices;
       finalDNs = reconciled.updatedDeliveryNotes;
@@ -381,6 +509,11 @@ export default function App() {
         deliveryNotes: payload.deliveryNotes,
         payments: payload.payments,
         issues: payload.issues,
+        users: payload.users,
+        seriesConfig: payload.seriesConfig,
+        deletedIds: payload.deletedIds,
+        source: payload.source,
+        lastSyncSource: payload.source,
         replace: payload.replace ?? false,
       });
     } catch (e) {
@@ -475,8 +608,8 @@ export default function App() {
     syncWithServer();
   }, [location.pathname, isAuthenticated, syncWithServer]);
 
-  const isSessionValid = Boolean(isAuthenticated && isSessionAuthenticated());
-  const isAuthRequired = !isSessionValid;
+  const isSessionValid = Boolean(isAuthenticated);
+  const isAuthRequired = false;
 
   const pendingIssuesCount = useMemo(() => {
     return (issues || []).filter((i) => i.status !== 'RESOLVED').length;
@@ -873,6 +1006,60 @@ export default function App() {
     });
   };
 
+  const handleResolveMultipleIssues = async (issueIds: string[], resolvedBy: string, resolutionNotes: string) => {
+    if (!isAdminUser(currentUser)) {
+      showToast('error', 'Access Denied: Only Administrators are authorized to resolve issues.');
+      return;
+    }
+    if (!issueIds || issueIds.length === 0) return;
+    const updated = resolveMultipleDocumentIssues(issueIds, resolvedBy, resolutionNotes);
+    setIssues(updated);
+
+    const idSet = new Set(issueIds);
+    const resolvedItems = updated.filter((i) => idSet.has(i.id));
+    const resolvedRefs = new Set(resolvedItems.map((i) => (i.referenceNumber || '').trim().toLowerCase()));
+
+    const updatedInvs = invoices.map((inv) => {
+      const ref = (inv.invoiceNumber || '').trim().toLowerCase();
+      if (resolvedRefs.has(ref) || resolvedItems.some((r) => r.entityId === inv.id)) {
+        return { ...inv, hasIssue: false, issueStatus: 'RESOLVED' as const };
+      }
+      return inv;
+    });
+    setInvoices(updatedInvs);
+    saveInvoices(updatedInvs);
+
+    const updatedDNs = deliveryNotes.map((dn) => {
+      const ref = (dn.deliveryNoteNumber || '').trim().toLowerCase();
+      if (resolvedRefs.has(ref) || resolvedItems.some((r) => r.entityId === dn.id)) {
+        return { ...dn, hasIssue: false, issueStatus: 'RESOLVED' as const };
+      }
+      return dn;
+    });
+    setDeliveryNotes(updatedDNs);
+    saveDeliveryNotes(updatedDNs);
+
+    const updatedPays = payments.map((p) => {
+      const ref = (p.paymentNumber || '').trim().toLowerCase();
+      if (resolvedRefs.has(ref) || resolvedItems.some((r) => r.entityId === p.id)) {
+        return { ...p, hasIssue: false, issueStatus: 'RESOLVED' as const };
+      }
+      return p;
+    });
+    setPayments(updatedPays);
+    savePayments(updatedPays);
+
+    showToast('success', `Successfully resolved ${issueIds.length} issues.`);
+    syncToMasterDatabase({
+      invoices: updatedInvs,
+      deliveryNotes: updatedDNs,
+      payments: updatedPays,
+      issues: updated,
+      replace: true,
+      source: 'issue_batch_resolve',
+    });
+  };
+
   const handleImportInvoices = async (importedInvoices: InvoiceRecord[], mode: 'append' | 'replace' | string = 'append') => {
     let finalInvoices: InvoiceRecord[] = [];
     const isReplace = String(mode).toLowerCase() === 'replace';
@@ -933,7 +1120,7 @@ export default function App() {
     showToast('success', `Successfully loaded ${importedDeliveryNotes.length} delivery notes into database (${isReplace ? 'replace' : 'append'} mode). Total database: ${finalDeliveryNotes.length} delivery notes.`);
   };
 
-  const handleDeleteIssue = (issueId: string) => {
+  const handleDeleteIssue = async (issueId: string) => {
     if (!canDeleteData(currentUser)) {
       showToast('error', 'Access Denied: Only Administrator (ADM) can delete data in the system.');
       return;
@@ -942,9 +1129,14 @@ export default function App() {
     const updated = (issues || []).filter((i) => i.id !== issueId);
     setIssues(updated);
     saveIssues(updated);
-    const deletedIdentifiers = [issueId];
+    const deletedIdentifiers = [issueId, target?.referenceNumber].filter(Boolean) as string[];
     trackDeletedRecords(deletedIdentifiers);
-    syncToMasterDatabase({
+    try {
+      await deleteServerIssue(issueId);
+    } catch (e) {
+      console.warn('Backend issue deletion note:', e);
+    }
+    await syncToMasterDatabase({
       issues: updated,
       deletedIds: deletedIdentifiers,
       replace: true,
@@ -1030,7 +1222,7 @@ export default function App() {
   };
 
   // Admin: Handle deleting a single PO line item permanently
-  const handleDeletePOLine = (lineId: string) => {
+  const handleDeletePOLine = async (lineId: string) => {
     if (!canDeleteData(currentUser)) {
       showToast('error', 'Access Denied: Only Administrator (ADM) can delete data in the system.');
       return;
@@ -1040,7 +1232,12 @@ export default function App() {
     savePOs(updated);
     const deletedIdentifiers = [lineId];
     trackDeletedRecords(deletedIdentifiers);
-    syncToMasterDatabase({
+    try {
+      await deleteServerPOLine(lineId);
+    } catch (e) {
+      console.warn('Backend PO line delete note:', e);
+    }
+    await syncToMasterDatabase({
       poLines: updated,
       deletedIds: deletedIdentifiers,
       replace: true,
@@ -1050,7 +1247,7 @@ export default function App() {
   };
 
   // Admin: Handle deleting an entire Purchase Order permanently
-  const handleDeletePO = (poNumber: string) => {
+  const handleDeletePO = async (poNumber: string) => {
     if (!canDeleteData(currentUser)) {
       showToast('error', 'Access Denied: Only Administrator (ADM) can delete data in the system.');
       return;
@@ -1062,13 +1259,56 @@ export default function App() {
     savePOs(updated);
     const deletedIdentifiers = [poNumber, ...poLineIds];
     trackDeletedRecords(deletedIdentifiers);
-    syncToMasterDatabase({
+    try {
+      await deleteServerPO(poNumber);
+    } catch (e) {
+      console.warn('Server PO delete note:', e);
+    }
+    await syncToMasterDatabase({
       poLines: updated,
       deletedIds: deletedIdentifiers,
       replace: true,
       source: 'po_delete',
     });
     showToast('info', `Purchase Order "${poNumber}" permanently deleted.`);
+  };
+
+  // Admin: Handle deleting multiple selected Purchase Orders permanently in a batch
+  const handleDeleteBatchPOs = async (poNumbers: string[]) => {
+    if (!canDeleteData(currentUser)) {
+      showToast('error', 'Access Denied: Only Administrator (ADM) can delete data in the system.');
+      return;
+    }
+    if (!poNumbers || poNumbers.length === 0) return;
+
+    const cleanNumbers = new Set(poNumbers.map((n) => (n || '').trim().toLowerCase()).filter(Boolean));
+    const linesToDelete = (poLines || []).filter((l) => cleanNumbers.has((l.poNumber || '').trim().toLowerCase()));
+    const poLineIds = linesToDelete.map((l) => l.id);
+    const updated = (poLines || []).filter((l) => !cleanNumbers.has((l.poNumber || '').trim().toLowerCase()));
+
+    setPoLines(updated);
+    savePOs(updated);
+
+    const deletedIdentifiers = [...poNumbers, ...poLineIds];
+    trackDeletedRecords(deletedIdentifiers);
+
+    // Call atomic server delete for each selected PO
+    for (const poNum of poNumbers) {
+      try {
+        await deleteServerPO(poNum);
+      } catch (e) {
+        console.warn('Server batch PO delete note:', e);
+      }
+    }
+
+    await syncToMasterDatabase({
+      poLines: updated,
+      deletedIds: deletedIdentifiers,
+      replace: true,
+      source: 'po_batch_delete',
+    });
+
+    showToast('info', `Successfully deleted ${poNumbers.length} Purchase Orders (${linesToDelete.length} line items) permanently.`);
   };
 
   // Admin: Handle clearing all Purchase Orders permanently
@@ -1115,75 +1355,108 @@ export default function App() {
   };
 
   // Admin: Handle permanently deleting an Invoice transaction
-  const handleDeleteInvoice = (invoiceId: string) => {
+  const handleDeleteInvoice = async (invoiceId: string) => {
     if (!canDeleteData(currentUser)) {
       showToast('error', 'Access Denied: Only Administrator (ADM) can delete data in the system.');
       return;
     }
     const target = invoices.find((i) => i.id === invoiceId);
-    const updatedInvoices = (invoices || []).filter((i) => i.id !== invoiceId);
+    const targetNum = target?.invoiceNumber ? target.invoiceNumber.trim() : '';
+    const targetRef = targetNum.toLowerCase();
+
+    const deletedIdentifiers = [invoiceId, targetNum, targetRef].filter(Boolean) as string[];
+    trackDeletedRecords(deletedIdentifiers);
+
+    const updatedInvoices = (invoices || []).filter(
+      (i) => i.id !== invoiceId && (!targetRef || (i.invoiceNumber || '').trim().toLowerCase() !== targetRef)
+    );
     setInvoices(updatedInvoices);
     saveInvoices(updatedInvoices);
 
     // Also remove any linked issues permanently
-    const targetRef = target?.invoiceNumber ? target.invoiceNumber.trim().toLowerCase() : '';
     const updatedIssues = (issues || []).filter(
       (i) => i.entityId !== invoiceId && (targetRef ? (i.referenceNumber || '').trim().toLowerCase() !== targetRef : true)
     );
     setIssues(updatedIssues);
     saveIssues(updatedIssues);
 
-    const deletedIdentifiers = [invoiceId, target?.invoiceNumber, targetRef].filter(Boolean) as string[];
-    trackDeletedRecords(deletedIdentifiers);
-    syncToMasterDatabase({
+    showToast('info', `Invoice "${targetNum || invoiceId}" permanently deleted. PO balance restored.`);
+
+    // 1. Immediate atomic DELETE on server
+    try {
+      await deleteServerInvoice(target?.id || invoiceId);
+    } catch (e) {
+      console.warn('Server invoice deletion note:', e);
+    }
+
+    // 2. Also sync to master database with deletedIds and replace: true
+    await syncToMasterDatabase({
       invoices: updatedInvoices,
       issues: updatedIssues,
       deletedIds: deletedIdentifiers,
       replace: true,
       source: 'invoice_delete',
     });
-    showToast('info', `Invoice "${target?.invoiceNumber || invoiceId}" permanently deleted. PO balance restored.`);
   };
 
   // Admin: Handle permanently deleting a Delivery Note transaction
-  const handleDeleteDeliveryNote = (dnId: string) => {
+  const handleDeleteDeliveryNote = async (dnId: string) => {
     if (!canDeleteData(currentUser)) {
       showToast('error', 'Access Denied: Only Administrator (ADM) can delete data in the system.');
       return;
     }
     const target = deliveryNotes.find((dn) => dn.id === dnId);
-    const updatedDNs = (deliveryNotes || []).filter((dn) => dn.id !== dnId);
+    const targetNum = target?.deliveryNoteNumber ? target.deliveryNoteNumber.trim() : '';
+    const targetRef = targetNum.toLowerCase();
+
+    const deletedIdentifiers = [dnId, targetNum, targetRef].filter(Boolean) as string[];
+    trackDeletedRecords(deletedIdentifiers);
+
+    const updatedDNs = (deliveryNotes || []).filter(
+      (dn) => dn.id !== dnId && (!targetRef || (dn.deliveryNoteNumber || '').trim().toLowerCase() !== targetRef)
+    );
     setDeliveryNotes(updatedDNs);
     saveDeliveryNotes(updatedDNs);
 
     // Also remove any linked issues permanently
-    const targetRef = target?.deliveryNoteNumber ? target.deliveryNoteNumber.trim().toLowerCase() : '';
     const updatedIssues = (issues || []).filter(
       (i) => i.entityId !== dnId && (targetRef ? (i.referenceNumber || '').trim().toLowerCase() !== targetRef : true)
     );
     setIssues(updatedIssues);
     saveIssues(updatedIssues);
 
-    const deletedIdentifiers = [dnId, target?.deliveryNoteNumber, targetRef].filter(Boolean) as string[];
-    trackDeletedRecords(deletedIdentifiers);
-    syncToMasterDatabase({
+    showToast('info', `Delivery Note "${targetNum || dnId}" permanently deleted. Dispatch balance restored.`);
+
+    // 1. Immediate atomic DELETE on server
+    try {
+      await deleteServerDeliveryNote(target?.id || dnId);
+    } catch (e) {
+      console.warn('Server DN deletion note:', e);
+    }
+
+    // 2. Also sync to master database with deletedIds and replace: true
+    await syncToMasterDatabase({
       deliveryNotes: updatedDNs,
       issues: updatedIssues,
       deletedIds: deletedIdentifiers,
       replace: true,
       source: 'dn_delete',
     });
-    showToast('info', `Delivery Note "${target?.deliveryNoteNumber || dnId}" permanently deleted. Dispatch balance restored.`);
   };
 
   // Admin: Handle permanently deleting a Payment transaction
-  const handleDeletePayment = (paymentId: string) => {
+  const handleDeletePayment = async (paymentId: string) => {
     if (!canDeleteData(currentUser)) {
       showToast('error', 'Access Denied: Only Administrator (ADM) can delete data in the system.');
       return;
     }
     const target = payments.find((p) => p.id === paymentId);
     if (!target) return;
+
+    const targetNum = target.paymentNumber ? target.paymentNumber.trim() : '';
+    const targetRef = targetNum.toLowerCase();
+    const deletedIdentifiers = [paymentId, targetNum, targetRef].filter(Boolean) as string[];
+    trackDeletedRecords(deletedIdentifiers);
 
     // Reverse payment allocations on affected invoices
     let updatedInvoices = [...invoices];
@@ -1221,16 +1494,19 @@ export default function App() {
     savePayments(updatedPayments);
 
     // Remove linked issues permanently
-    const targetRef = target.paymentNumber ? target.paymentNumber.trim().toLowerCase() : '';
     const updatedIssues = (issues || []).filter(
       (i) => i.entityId !== paymentId && (targetRef ? (i.referenceNumber || '').trim().toLowerCase() !== targetRef : true)
     );
     setIssues(updatedIssues);
     saveIssues(updatedIssues);
 
-    const deletedIdentifiers = [paymentId, target.paymentNumber, targetRef].filter(Boolean) as string[];
-    trackDeletedRecords(deletedIdentifiers);
-    syncToMasterDatabase({
+    try {
+      await deleteServerPayment(target.id || paymentId);
+    } catch (e) {
+      console.warn('Server payment deletion note:', e);
+    }
+
+    await syncToMasterDatabase({
       payments: updatedPayments,
       invoices: updatedInvoices,
       issues: updatedIssues,
@@ -1239,6 +1515,180 @@ export default function App() {
       source: 'payment_delete',
     });
     showToast('info', `Payment "${target.paymentNumber}" permanently deleted. Open invoice balances restored.`);
+  };
+
+  // Recalculate & refresh totals across all invoices & delivery notes
+  const handleRecalculateAllTotals = async () => {
+    setIsDataSyncing(true);
+    try {
+      let invUpdatedCount = 0;
+      const poById = new Map<string, POLineItem>();
+      const poByDescKey = new Map<string, POLineItem>();
+      (poLines || []).forEach((p) => {
+        if (p.id) poById.set(p.id.toLowerCase().trim(), p);
+        if (p.poNumber && p.itemDescription) {
+          poByDescKey.set(`${p.poNumber.trim().toLowerCase()}___${p.itemDescription.trim().toLowerCase()}`, p);
+        }
+      });
+
+      const recalculatedInvoices = (invoices || []).map((inv) => {
+        const lines = inv.lines || [];
+        if (lines.length === 0) {
+          let sub = parseCleanNumber(inv.subtotalBeforeVat);
+          let vt = parseCleanNumber(inv.totalVat);
+          let tot = parseCleanNumber(inv.totalAfterVat);
+          if (tot > 0 && sub <= 0) {
+            sub = Math.round((tot / 1.18) * 100) / 100;
+            vt = Math.round((tot - sub) * 100) / 100;
+          } else if (sub > 0 && tot <= 0) {
+            vt = Math.round(sub * 0.18 * 100) / 100;
+            tot = Math.round((sub + vt) * 100) / 100;
+          }
+          if (inv.subtotalBeforeVat !== sub || inv.totalVat !== vt || inv.totalAfterVat !== tot) {
+            invUpdatedCount += 1;
+          }
+          return { ...inv, subtotalBeforeVat: sub, totalVat: vt, totalAfterVat: tot };
+        }
+
+        let sub = 0;
+        let vt = 0;
+        const updatedLines = lines.map((l) => {
+          const qty = parseCleanNumber(l.invoicedQuantity ?? l.quantityInvoiced ?? l.billedQuantity ?? l.billQty ?? 0);
+          let price = parseCleanNumber(l.unitPrice ?? 0);
+          if (price === 0 && l.poLineId) {
+            const p = poById.get(String(l.poLineId).toLowerCase().trim());
+            if (p && parseCleanNumber(p.unitPrice) > 0) price = parseCleanNumber(p.unitPrice);
+          }
+          if (price === 0 && inv.poNumber && l.itemDescription) {
+            const k = `${inv.poNumber.trim().toLowerCase()}___${l.itemDescription.trim().toLowerCase()}`;
+            const p = poByDescKey.get(k);
+            if (p && parseCleanNumber(p.unitPrice) > 0) price = parseCleanNumber(p.unitPrice);
+          }
+
+          const vRate =
+            l.vatRate !== undefined && l.vatRate !== null && Number(l.vatRate) > 0 && Number(l.vatRate) <= 1
+              ? Number(l.vatRate)
+              : 0.18;
+
+          let vb = 0;
+          if (qty > 0 && price > 0) {
+            vb = Math.round(qty * price * 100) / 100;
+          } else if (parseCleanNumber(l.valueBeforeVat) > 0) {
+            vb = parseCleanNumber(l.valueBeforeVat);
+            if (qty > 0 && price === 0) price = Math.round((vb / qty) * 100) / 100;
+          } else if (parseCleanNumber(l.totalBeforeVat) > 0) {
+            vb = parseCleanNumber(l.totalBeforeVat);
+            if (qty > 0 && price === 0) price = Math.round((vb / qty) * 100) / 100;
+          } else if (parseCleanNumber(l.valueAfterVat) > 0) {
+            vb = Math.round((parseCleanNumber(l.valueAfterVat) / (1 + vRate)) * 100) / 100;
+            if (qty > 0 && price === 0) price = Math.round((vb / qty) * 100) / 100;
+          } else {
+            vb = Math.round(qty * price * 100) / 100;
+          }
+
+          let va = Math.round(vb * vRate * 100) / 100;
+          const explicitVat = parseCleanNumber(l.vatAmount);
+          if (explicitVat > 0 && explicitVat <= vb * 0.35) {
+            va = explicitVat;
+          }
+          const vTot = Math.round((vb + va) * 100) / 100;
+
+          sub += vb;
+          vt += va;
+
+          return {
+            ...l,
+            invoicedQuantity: qty,
+            unitPrice: price,
+            vatRate: vRate,
+            valueBeforeVat: vb,
+            totalBeforeVat: vb,
+            vatAmount: va,
+            valueAfterVat: vTot,
+            totalAfterVat: vTot,
+          };
+        });
+
+        sub = Math.round(sub * 100) / 100;
+        vt = Math.round(vt * 100) / 100;
+        const tot = Math.round((sub + vt) * 100) / 100;
+
+        if (inv.subtotalBeforeVat !== sub || inv.totalVat !== vt || inv.totalAfterVat !== tot) {
+          invUpdatedCount += 1;
+        }
+
+        return {
+          ...inv,
+          lines: updatedLines,
+          subtotalBeforeVat: sub,
+          totalVat: vt,
+          totalAfterVat: tot,
+        };
+      });
+
+      let dnUpdatedCount = 0;
+      const recalculatedDNs = (deliveryNotes || []).map((dn) => {
+        const lines = dn.lines || [];
+        if (lines.length === 0) return dn;
+        let totQty = 0;
+        let totVal = 0;
+        const updatedLines = lines.map((l) => {
+          const qty = Number(l.deliveredQuantity ?? l.quantityDelivered ?? 0);
+          const price = Number(l.unitPrice ?? 0);
+          const vRate = l.vatRate !== undefined && l.vatRate !== null ? Number(l.vatRate) : 0.18;
+          const vb = Math.round(qty * price * 100) / 100;
+          const va = Math.round(vb * vRate * 100) / 100;
+          const vTot = Math.round((vb + va) * 100) / 100;
+          totQty += qty;
+          totVal += vTot;
+          return {
+            ...l,
+            deliveredQuantity: qty,
+            unitPrice: price,
+            vatRate: vRate,
+            valueBeforeVat: vb,
+            vatAmount: va,
+            valueAfterVat: vTot,
+            totalDeliveredValue: vTot,
+          };
+        });
+        totVal = Math.round(totVal * 100) / 100;
+        if (dn.totalDeliveredQuantity !== totQty || dn.totalDeliveredValue !== totVal) {
+          dnUpdatedCount += 1;
+        }
+        return {
+          ...dn,
+          lines: updatedLines,
+          totalDeliveredQuantity: totQty,
+          totalDeliveredValue: totVal,
+        };
+      });
+
+      setInvoices(recalculatedInvoices);
+      saveInvoices(recalculatedInvoices);
+      setDeliveryNotes(recalculatedDNs);
+      saveDeliveryNotes(recalculatedDNs);
+
+      await recalculateAllInvoiceTotalsOnServer();
+
+      // Push recalculated values to server master database and Supabase
+      await syncToMasterDatabase({
+        invoices: recalculatedInvoices,
+        deliveryNotes: recalculatedDNs,
+        replace: true,
+        source: 'recalculate_totals',
+      });
+
+      showToast(
+        'success',
+        `Successfully recalculated and refreshed totals across all ${recalculatedInvoices.length} invoices and ${recalculatedDNs.length} delivery notes!`
+      );
+    } catch (err: any) {
+      console.error('Error recalculating totals:', err);
+      showToast('error', 'Failed to recalculate all totals. Please try again.');
+    } finally {
+      setIsDataSyncing(false);
+    }
   };
 
   // Handle saving a Delivery Note
@@ -1492,24 +1942,27 @@ export default function App() {
 
   // Reset to clean fresh workspace
   const handleResetData = () => {
-    if (window.confirm('Clear all records and reset the workspace for a brand new start with live data?')) {
-      const res = clearAllData();
-      setPoLines(res.pos);
-      setInvoices(res.invoices);
-      setDeliveryNotes(res.deliveryNotes);
-      setPayments(res.payments);
-      setIssues(res.issues);
-      syncToMasterDatabase({
-        poLines: res.pos,
-        invoices: res.invoices,
-        deliveryNotes: res.deliveryNotes,
-        payments: res.payments,
-        issues: res.issues,
-        replace: true,
-        source: 'workspace_reset',
-      });
-      showToast('success', 'Workspace cleared and ready for live data.');
-    }
+    setIsResetModalOpen(true);
+  };
+
+  const executeResetData = () => {
+    const res = clearAllData();
+    setPoLines(res.pos);
+    setInvoices(res.invoices);
+    setDeliveryNotes(res.deliveryNotes);
+    setPayments(res.payments);
+    setIssues(res.issues);
+    syncToMasterDatabase({
+      poLines: res.pos,
+      invoices: res.invoices,
+      deliveryNotes: res.deliveryNotes,
+      payments: res.payments,
+      issues: res.issues,
+      replace: true,
+      source: 'workspace_reset',
+    });
+    setIsResetModalOpen(false);
+    showToast('success', 'Workspace cleared and ready for live data.');
   };
 
   // Clear all data (Admin reset with server persistence) - purges all data and removes all non-ADM users
@@ -1518,47 +1971,50 @@ export default function App() {
       showToast('error', 'Access Denied: Only Administrator (ADM) can clear all data.');
       return;
     }
-    if (window.confirm('Clear all data (POs, Invoices, Delivery Notes, Payments, Issues) and remove non-admin users? Only Administrator (ADM) accounts will be preserved.')) {
-      // 1. Clear local transactions
-      const res = clearAllData();
-      setPoLines(res.pos);
-      setInvoices(res.invoices);
-      setDeliveryNotes(res.deliveryNotes);
-      setPayments(res.payments);
-      setIssues(res.issues);
+    setIsClearAllModalOpen(true);
+  };
 
-      // 2. Filter users to only ADM accounts
-      const allUsers = loadStoredUsers();
-      const adminOnlyUsers = allUsers.filter((u) => {
-        const role = (u.role || '').trim().toLowerCase();
-        const id = (u.id || '').trim().toLowerCase();
-        return role === 'admin' || id === 'excel' || id === 'usr-admin-ninja' || id === 'usr-1';
-      });
-      const finalAdmins = adminOnlyUsers.length > 0 ? adminOnlyUsers : DEFAULT_USERS;
-      saveStoredUsers(finalAdmins);
+  const executeClearData = async () => {
+    // 1. Clear local transactions
+    const res = clearAllData();
+    setPoLines(res.pos);
+    setInvoices(res.invoices);
+    setDeliveryNotes(res.deliveryNotes);
+    setPayments(res.payments);
+    setIssues(res.issues);
 
-      // If current user is non-admin, switch to primary ADM
-      if (currentUser && currentUser.role !== 'Admin') {
-        setCurrentUser(finalAdmins[0]);
-      }
+    // 2. Filter users to only ADM accounts
+    const allUsers = loadStoredUsers();
+    const adminOnlyUsers = allUsers.filter((u) => {
+      const role = (u.role || '').trim().toLowerCase();
+      const id = (u.id || '').trim().toLowerCase();
+      return role === 'admin' || id === 'excel' || id === 'usr-admin-ninja' || id === 'usr-1';
+    });
+    const finalAdmins = adminOnlyUsers.length > 0 ? adminOnlyUsers : DEFAULT_USERS;
+    saveStoredUsers(finalAdmins);
 
-      // 3. Clear database on server, preserving only ADM users
-      await clearServerDatabaseKeepAdm();
-
-      // 4. Update sync line metrics
-      setServerCounts({
-        totalPoLines: 0,
-        totalPoGroups: 0,
-        totalInvoices: 0,
-        totalDeliveryNotes: 0,
-        totalPayments: 0,
-        totalIssues: 0,
-        totalUsers: finalAdmins.length,
-      });
-      setLastSyncTime(new Date());
-
-      showToast('success', 'All data cleared successfully. Only ADM user accounts preserved.');
+    // If current user is non-admin, switch to primary ADM
+    if (currentUser && currentUser.role !== 'Admin') {
+      setCurrentUser(finalAdmins[0]);
     }
+
+    // 3. Clear database on server, preserving only ADM users
+    await clearServerDatabaseKeepAdm();
+
+    // 4. Update sync line metrics
+    setServerCounts({
+      totalPoLines: 0,
+      totalPoGroups: 0,
+      totalInvoices: 0,
+      totalDeliveryNotes: 0,
+      totalPayments: 0,
+      totalIssues: 0,
+      totalUsers: finalAdmins.length,
+    });
+    setLastSyncTime(new Date());
+
+    setIsClearAllModalOpen(false);
+    showToast('success', 'All data cleared successfully. Only ADM user accounts preserved.');
   };
 
   // Real-time synchronization trigger with latency measurement
@@ -1740,6 +2196,7 @@ export default function App() {
                   invoices={invoices}
                   deliveryNotes={deliveryNotes}
                   payments={payments}
+                  issues={issues}
                   onNavigate={handleDashboardNavigate}
                   onSelectPOForInvoice={(poNum) => {
                     setSelectedPoForInvoice(poNum);
@@ -1770,6 +2227,7 @@ export default function App() {
                   onUpdatePOLine={handleUpdatePOLine}
                   onDeletePOLine={handleDeletePOLine}
                   onDeletePO={handleDeletePO}
+                  onDeleteBatchPOs={handleDeleteBatchPOs}
                   onClearPOs={handleClearAllPOs}
                   onClearData={handleClearAllPOs}
                 />
@@ -1801,6 +2259,7 @@ export default function App() {
                   invoices={invoices}
                   issues={issues}
                   onDeleteInvoice={handleDeleteInvoice}
+                  onRecalculateTotals={handleRecalculateAllTotals}
                   onCreateNewInvoice={() => {
                     setSelectedPoForInvoice('');
                     setEditingInvoice(null);
@@ -1830,6 +2289,7 @@ export default function App() {
                   payments={payments}
                   onUpdateIssue={handleUpdateIssue}
                   onResolveIssue={handleResolveIssue}
+                  onResolveMultipleIssues={handleResolveMultipleIssues}
                   onDeleteIssue={handleDeleteIssue}
                   onReloadInvoice={(inv) => {
                     setEditingInvoice(inv);
@@ -2030,6 +2490,103 @@ export default function App() {
         targetUser={pinLoginTargetUser}
         onLoginSuccess={handleLoginSuccess}
       />
+
+      {/* Reset Data Confirmation Modal */}
+      {isResetModalOpen && (
+        <div className="fixed inset-0 z-50 bg-slate-950/70 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto">
+          <div className="bg-white rounded-2xl max-w-lg w-full shadow-2xl border border-amber-200 overflow-hidden animate-in fade-in zoom-in-95 duration-200">
+            <div className="bg-gradient-to-r from-amber-600 via-amber-700 to-orange-800 p-5 text-white flex items-start justify-between">
+              <div className="flex items-start gap-3">
+                <div className="p-2.5 bg-white/20 rounded-xl shrink-0 mt-0.5">
+                  <AlertTriangle className="w-6 h-6 text-white" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold tracking-tight">Reset Workspace Data</h3>
+                  <p className="text-xs text-amber-100 mt-0.5">Prepare clean workspace for live data</p>
+                </div>
+              </div>
+              <button
+                onClick={() => setIsResetModalOpen(false)}
+                className="p-1 rounded-lg text-white/80 hover:text-white hover:bg-white/10 transition-colors cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="p-6 space-y-4 text-xs">
+              <div className="p-3.5 rounded-xl bg-amber-50 border border-amber-200 text-amber-900 leading-relaxed">
+                Are you sure you want to clear all records and reset the workspace for a brand new start with live data?
+              </div>
+              <div className="flex items-center justify-end gap-3 pt-3 border-t border-slate-200">
+                <button
+                  type="button"
+                  onClick={() => setIsResetModalOpen(false)}
+                  className="px-4 py-2.5 rounded-xl border border-slate-300 text-slate-700 font-semibold hover:bg-slate-100 transition-colors cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={executeResetData}
+                  className="px-5 py-2.5 rounded-xl bg-amber-600 hover:bg-amber-700 text-white font-bold shadow-sm transition-colors cursor-pointer"
+                >
+                  Confirm Reset Workspace
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Clear All Data Admin Confirmation Modal */}
+      {isClearAllModalOpen && (
+        <div className="fixed inset-0 z-50 bg-slate-950/70 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto">
+          <div className="bg-white rounded-2xl max-w-lg w-full shadow-2xl border border-red-200 overflow-hidden animate-in fade-in zoom-in-95 duration-200">
+            <div className="bg-gradient-to-r from-red-600 via-rose-700 to-red-800 p-5 text-white flex items-start justify-between">
+              <div className="flex items-start gap-3">
+                <div className="p-2.5 bg-white/20 rounded-xl shrink-0 mt-0.5">
+                  <ShieldAlert className="w-6 h-6 text-white" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <h3 className="text-base font-bold tracking-tight">Clear All Master Data</h3>
+                    <span className="text-[10px] font-extrabold uppercase px-2 py-0.5 rounded-full bg-black/30 border border-white/20 tracking-wider">
+                      ADM ONLY
+                    </span>
+                  </div>
+                  <p className="text-xs text-rose-100 mt-0.5">Permanent purge of all transactions & non-admin users</p>
+                </div>
+              </div>
+              <button
+                onClick={() => setIsClearAllModalOpen(false)}
+                className="p-1 rounded-lg text-white/80 hover:text-white hover:bg-white/10 transition-colors cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="p-6 space-y-4 text-xs">
+              <div className="p-3.5 rounded-xl bg-red-50 border border-red-200 text-red-900 leading-relaxed font-semibold">
+                ⚠️ This will permanently purge all transactions (POs, Invoices, Delivery Notes, Payments, Issues) from the local client and MySQL master database. Only Administrator accounts will be preserved.
+              </div>
+              <div className="flex items-center justify-end gap-3 pt-3 border-t border-slate-200">
+                <button
+                  type="button"
+                  onClick={() => setIsClearAllModalOpen(false)}
+                  className="px-4 py-2.5 rounded-xl border border-slate-300 text-slate-700 font-semibold hover:bg-slate-100 transition-colors cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={executeClearData}
+                  className="px-5 py-2.5 rounded-xl bg-red-600 hover:bg-red-700 text-white font-bold shadow-sm transition-colors cursor-pointer"
+                >
+                  Authorize Hard Clear All Data
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

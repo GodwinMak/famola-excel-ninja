@@ -29,6 +29,7 @@ import {
   loadStoredIssues,
   saveIssues
 } from '../utils/storage';
+import { PermanentDeleteModal } from './PermanentDeleteModal';
 import { naturalCompare } from '../utils/naturalSort';
 import { 
   loadStoredInvitations, 
@@ -176,6 +177,9 @@ export const SettingsManager: React.FC<SettingsManagerProps> = ({
   const [copiedLinkId, setCopiedLinkId] = useState<string | null>(null);
   const [copiedTemplateId, setCopiedTemplateId] = useState<string | null>(null);
   const [newlyGeneratedLink, setNewlyGeneratedLink] = useState<{ invitation: EmailAccessInvitation; link: string } | null>(null);
+  const [userPendingDelete, setUserPendingDelete] = useState<AppUser | null>(null);
+  const [invitationPendingDelete, setInvitationPendingDelete] = useState<EmailAccessInvitation | null>(null);
+  const [isClearPOsModalOpen, setIsClearPOsModalOpen] = useState(false);
 
   // 4-Digit PIN, Hold & Screen Permissions state
   const [selectedUserForPermissions, setSelectedUserForPermissions] = useState<AppUser | null>(null);
@@ -379,10 +383,9 @@ export const SettingsManager: React.FC<SettingsManagerProps> = ({
   };
 
   const handleDeleteInvitation = (id: string) => {
-    if (confirm('Delete this email access invitation?')) {
-      const updated = invitations.filter((inv) => inv.id !== id);
-      setInvitations(updated);
-      saveStoredInvitations(updated);
+    const inv = invitations.find((i) => i.id === id);
+    if (inv) {
+      setInvitationPendingDelete(inv);
     }
   };
 
@@ -879,11 +882,7 @@ export const SettingsManager: React.FC<SettingsManagerProps> = ({
                 <button
                   type="button"
                   id="settings-clear-all-pos-btn"
-                  onClick={() => {
-                    if (window.confirm('Are you sure you want to clear all loaded Purchase Orders? Invoices, delivery notes, and payments will be retained.')) {
-                      onClearPOs();
-                    }
-                  }}
+                  onClick={() => setIsClearPOsModalOpen(true)}
                   disabled={!canLoadDB}
                   className="px-4 py-2 bg-amber-50 hover:bg-amber-100 disabled:opacity-40 disabled:cursor-not-allowed border border-amber-200 text-amber-800 rounded-lg text-xs font-semibold inline-flex items-center gap-1.5 transition-colors cursor-pointer"
                   title={!canLoadDB ? 'Admin permission required to clear POs' : 'Clear all PO lines and groups'}
@@ -1545,19 +1544,9 @@ export const SettingsManager: React.FC<SettingsManagerProps> = ({
                           {isAdmin && !isSelf && (
                             <button
                               type="button"
-                              onClick={() => {
-                                if (confirm(`Remove user ${u.name} from the system?`)) {
-                                  const filtered = users.filter((x) => x.id !== u.id);
-                                  setUsers(filtered);
-                                  saveStoredUsers(filtered);
-                                  fetch(`${API_BASE}/api/users/${encodeURIComponent(u.id)}`, {
-                                    method: 'DELETE',
-                                    headers: authHeaders(),
-                                  }).catch((e) => console.warn('Backend user removal note:', e));
-                                }
-                              }}
+                              onClick={() => setUserPendingDelete(u)}
                               className="p-1 text-slate-400 hover:text-red-600 rounded transition-colors cursor-pointer"
-                              title="Delete user"
+                              title="Delete user permanently"
                             >
                               <Trash2 className="w-4 h-4" />
                             </button>
@@ -2303,6 +2292,93 @@ export const SettingsManager: React.FC<SettingsManagerProps> = ({
               </button>
             </div>
           </form>
+        </div>
+      )}
+
+      {/* Permanent Delete Modal for Admin Deleting User Account */}
+      <PermanentDeleteModal
+        isOpen={!!userPendingDelete}
+        onClose={() => setUserPendingDelete(null)}
+        onConfirm={() => {
+          if (userPendingDelete) {
+            const u = userPendingDelete;
+            const filtered = users.filter((x) => x.id !== u.id);
+            setUsers(filtered);
+            saveStoredUsers(filtered);
+            fetch(`${API_BASE}/api/users/${encodeURIComponent(u.id)}`, {
+              method: 'DELETE',
+              headers: authHeaders(),
+            }).catch((e) => console.warn('Backend user removal note:', e));
+            setUserPendingDelete(null);
+            setUserActionNotice({ type: 'success', text: `User "${u.name}" permanently deleted.` });
+          }
+        }}
+        transactionType="USER"
+        referenceNumber={userPendingDelete?.email || userPendingDelete?.id || ''}
+        customerName={userPendingDelete?.name}
+        details={`Permanently removes user account for "${userPendingDelete?.name}" (${userPendingDelete?.role || 'Staff'}) from the database and revokes system credentials.`}
+      />
+
+      {/* Permanent Delete Modal for Revoking Email Invitation */}
+      <PermanentDeleteModal
+        isOpen={!!invitationPendingDelete}
+        onClose={() => setInvitationPendingDelete(null)}
+        onConfirm={() => {
+          if (invitationPendingDelete) {
+            const updated = invitations.filter((inv) => inv.id !== invitationPendingDelete.id);
+            setInvitations(updated);
+            saveStoredInvitations(updated);
+            setInvitationPendingDelete(null);
+            setUserActionNotice({ type: 'success', text: `Access invitation for "${invitationPendingDelete.email}" permanently removed.` });
+          }
+        }}
+        transactionType="INVITATION"
+        referenceNumber={invitationPendingDelete?.email || ''}
+        customerName={invitationPendingDelete?.recipientName}
+        details={`Permanently revokes and removes pending access link for ${invitationPendingDelete?.email}.`}
+      />
+
+      {/* Clear All POs Modal */}
+      {isClearPOsModalOpen && (
+        <div className="fixed inset-0 z-50 bg-slate-950/70 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto">
+          <div className="bg-white rounded-2xl max-w-lg w-full shadow-2xl border border-amber-200 overflow-hidden animate-in fade-in zoom-in-95 duration-200">
+            <div className="bg-gradient-to-r from-amber-600 via-amber-700 to-orange-800 p-5 text-white flex items-start justify-between">
+              <div className="flex items-start gap-3">
+                <div className="p-2.5 bg-white/20 rounded-xl shrink-0 mt-0.5">
+                  <Trash2 className="w-6 h-6 text-white" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold tracking-tight">Clear All Purchase Orders</h3>
+                  <p className="text-xs text-amber-100 mt-0.5">Administrator PO Database Reset</p>
+                </div>
+              </div>
+            </div>
+            <div className="p-6 space-y-4 text-xs">
+              <p className="text-slate-700 leading-relaxed">
+                Are you sure you want to permanently clear all loaded Purchase Orders? Invoices, delivery notes, and payments will be retained.
+              </p>
+              <div className="flex items-center justify-end gap-3 pt-3 border-t border-slate-200">
+                <button
+                  type="button"
+                  onClick={() => setIsClearPOsModalOpen(false)}
+                  className="px-4 py-2.5 rounded-xl border border-slate-300 text-slate-700 font-semibold hover:bg-slate-100 transition-colors cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (onClearPOs) onClearPOs();
+                    setIsClearPOsModalOpen(false);
+                  }}
+                  className="px-5 py-2.5 rounded-xl bg-amber-600 hover:bg-amber-700 text-white font-bold shadow-sm inline-flex items-center gap-2 transition-colors cursor-pointer"
+                >
+                  <Trash2 className="w-4 h-4" />
+                  <span>Confirm Clear All POs</span>
+                </button>
+              </div>
+            </div>
+          </div>
         </div>
       )}
     </div>
