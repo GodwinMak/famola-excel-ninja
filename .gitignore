@@ -11,3 +11,4 @@ coverage
 data/attachments/*
 !data/attachments/.gitkeep
 bun.lock
+metadata.json
