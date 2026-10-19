@@ -553,8 +553,24 @@ async function pushRecordsToSupabase(payload) {
     if (dedupedDeliveryNotes.length > 0) {
       for (const dn of dedupedDeliveryNotes) {
         if (!dn || !dn.id) continue;
+        let dnIdToUse = dn.id;
+        try {
+          if (dn.deliveryNoteNumber) {
+            const { data: existingDn } = await client
+              .from("delivery_notes")
+              .select("id")
+              .eq("delivery_note_number", dn.deliveryNoteNumber)
+              .maybeSingle();
+            if (existingDn?.id) {
+              dnIdToUse = existingDn.id;
+            }
+          }
+        } catch {
+          // ignore lookup error
+        }
+
         const dnRow = {
-          id: dn.id,
+          id: dnIdToUse,
           delivery_note_number: dn.deliveryNoteNumber || `DN-${Date.now()}`,
           delivery_date:
             safeDate(dn.deliveryDate) || new Date().toISOString().slice(0, 10),
@@ -585,6 +601,7 @@ async function pushRecordsToSupabase(payload) {
           issue_status: dn.issueStatus || "PENDING",
           updated_at: new Date().toISOString(),
         };
+
         let { error: dnErr } = await executeWithRetry(() =>
           client.from("delivery_notes").upsert(dnRow, { onConflict: "id" }),
         );
@@ -595,15 +612,34 @@ async function pushRecordsToSupabase(payload) {
             dnErr.message?.includes("duplicate key"))
         ) {
           try {
-            await client
+            const { data: conflictDn } = await client
               .from("delivery_notes")
-              .delete()
-              .eq("delivery_note_number", dn.deliveryNoteNumber);
-            const { error: retryErr } = await executeWithRetry(() =>
-              client.from("delivery_notes").upsert(dnRow, { onConflict: "id" }),
-            );
-            if (!retryErr) dnErr = null;
-            else dnErr = retryErr;
+              .select("id")
+              .eq("delivery_note_number", dn.deliveryNoteNumber)
+              .maybeSingle();
+
+            if (conflictDn?.id) {
+              dnRow.id = conflictDn.id;
+              dnIdToUse = conflictDn.id;
+              await client
+                .from("delivery_note_lines")
+                .delete()
+                .eq("delivery_note_id", conflictDn.id);
+              const { error: updErr } = await client
+                .from("delivery_notes")
+                .update(dnRow)
+                .eq("id", conflictDn.id);
+              if (!updErr) {
+                dnErr = null;
+              } else {
+                await client.from("delivery_notes").delete().eq("id", conflictDn.id);
+                const { error: retryErr } = await executeWithRetry(() =>
+                  client.from("delivery_notes").upsert(dnRow, { onConflict: "id" }),
+                );
+                if (!retryErr) dnErr = null;
+                else dnErr = retryErr;
+              }
+            }
           } catch (e) {
             console.warn(
               "Fallback resolve DN duplicate note:",
@@ -618,9 +654,14 @@ async function pushRecordsToSupabase(payload) {
           );
           errors.push(`DN ${dn.deliveryNoteNumber}: ${dnErr.message}`);
         } else if (Array.isArray(dn.lines) && dn.lines.length > 0) {
+          await client
+            .from("delivery_note_lines")
+            .delete()
+            .eq("delivery_note_id", dnIdToUse);
+
           const lineRows = dn.lines.map((l, idx) => ({
-            id: l.id || `${dn.id}-line-${idx}`,
-            delivery_note_id: dn.id,
+            id: l.id ? `${dnIdToUse}-${l.id}` : `${dnIdToUse}-line-${idx}`,
+            delivery_note_id: dnIdToUse,
             po_line_id: l.poLineId || "",
             item_description: l.itemDescription || "",
             unit_of_measure: l.unitOfMeasure || "UNIT",
@@ -654,8 +695,24 @@ async function pushRecordsToSupabase(payload) {
     if (dedupedInvoices.length > 0) {
       for (const inv of dedupedInvoices) {
         if (!inv || !inv.id) continue;
+        let invIdToUse = inv.id;
+        try {
+          if (inv.invoiceNumber) {
+            const { data: existingInv } = await client
+              .from("invoices")
+              .select("id")
+              .eq("invoice_number", inv.invoiceNumber)
+              .maybeSingle();
+            if (existingInv?.id) {
+              invIdToUse = existingInv.id;
+            }
+          }
+        } catch {
+          // ignore lookup error
+        }
+
         const invRow = {
-          id: inv.id,
+          id: invIdToUse,
           invoice_number: inv.invoiceNumber || `INV-${Date.now()}`,
           invoice_date:
             safeDate(inv.invoiceDate) || new Date().toISOString().slice(0, 10),
@@ -682,6 +739,7 @@ async function pushRecordsToSupabase(payload) {
           issue_status: inv.issueStatus || "PENDING",
           updated_at: new Date().toISOString(),
         };
+
         let { error: invErr } = await executeWithRetry(() =>
           client.from("invoices").upsert(invRow, { onConflict: "id" }),
         );
@@ -692,15 +750,34 @@ async function pushRecordsToSupabase(payload) {
             invErr.message?.includes("duplicate key"))
         ) {
           try {
-            await client
+            const { data: conflictRow } = await client
               .from("invoices")
-              .delete()
-              .eq("invoice_number", inv.invoiceNumber);
-            const { error: retryErr } = await executeWithRetry(() =>
-              client.from("invoices").upsert(invRow, { onConflict: "id" }),
-            );
-            if (!retryErr) invErr = null;
-            else invErr = retryErr;
+              .select("id")
+              .eq("invoice_number", inv.invoiceNumber)
+              .maybeSingle();
+
+            if (conflictRow?.id) {
+              invRow.id = conflictRow.id;
+              invIdToUse = conflictRow.id;
+              await client
+                .from("invoice_lines")
+                .delete()
+                .eq("invoice_id", conflictRow.id);
+              const { error: updErr } = await client
+                .from("invoices")
+                .update(invRow)
+                .eq("id", conflictRow.id);
+              if (!updErr) {
+                invErr = null;
+              } else {
+                await client.from("invoices").delete().eq("id", conflictRow.id);
+                const { error: retryErr } = await executeWithRetry(() =>
+                  client.from("invoices").upsert(invRow, { onConflict: "id" }),
+                );
+                if (!retryErr) invErr = null;
+                else invErr = retryErr;
+              }
+            }
           } catch (e) {
             console.warn(
               "Fallback resolve invoice duplicate note:",
@@ -715,9 +792,14 @@ async function pushRecordsToSupabase(payload) {
           );
           errors.push(`INV ${inv.invoiceNumber}: ${invErr.message}`);
         } else if (Array.isArray(inv.lines) && inv.lines.length > 0) {
+          await client
+            .from("invoice_lines")
+            .delete()
+            .eq("invoice_id", invIdToUse);
+
           const lineRows = inv.lines.map((l, idx) => ({
-            id: l.id || `${inv.id}-line-${idx}`,
-            invoice_id: inv.id,
+            id: l.id ? `${invIdToUse}-${l.id}` : `${invIdToUse}-line-${idx}`,
+            invoice_id: invIdToUse,
             po_line_id: l.poLineId || "",
             item_description: l.itemDescription || "",
             unit_of_measure: l.unitOfMeasure || "UNIT",
@@ -750,8 +832,24 @@ async function pushRecordsToSupabase(payload) {
     if (dedupedPayments.length > 0) {
       for (const pay of dedupedPayments) {
         if (!pay || !pay.id) continue;
+        let payIdToUse = pay.id;
+        try {
+          if (pay.paymentNumber) {
+            const { data: existingPay } = await client
+              .from("payments")
+              .select("id")
+              .eq("payment_number", pay.paymentNumber)
+              .maybeSingle();
+            if (existingPay?.id) {
+              payIdToUse = existingPay.id;
+            }
+          }
+        } catch {
+          // ignore lookup error
+        }
+
         const payRow = {
-          id: pay.id,
+          id: payIdToUse,
           payment_number: pay.paymentNumber || `PAY-${Date.now()}`,
           payment_date:
             safeDate(pay.paymentDate) || new Date().toISOString().slice(0, 10),
@@ -777,15 +875,34 @@ async function pushRecordsToSupabase(payload) {
             payErr.message?.includes("duplicate key"))
         ) {
           try {
-            await client
+            const { data: conflictPay } = await client
               .from("payments")
-              .delete()
-              .eq("payment_number", pay.paymentNumber);
-            const { error: retryErr } = await executeWithRetry(() =>
-              client.from("payments").upsert(payRow, { onConflict: "id" }),
-            );
-            if (!retryErr) payErr = null;
-            else payErr = retryErr;
+              .select("id")
+              .eq("payment_number", pay.paymentNumber)
+              .maybeSingle();
+
+            if (conflictPay?.id) {
+              payRow.id = conflictPay.id;
+              payIdToUse = conflictPay.id;
+              await client
+                .from("payment_allocations")
+                .delete()
+                .eq("payment_id", conflictPay.id);
+              const { error: updErr } = await client
+                .from("payments")
+                .update(payRow)
+                .eq("id", conflictPay.id);
+              if (!updErr) {
+                payErr = null;
+              } else {
+                await client.from("payments").delete().eq("id", conflictPay.id);
+                const { error: retryErr } = await executeWithRetry(() =>
+                  client.from("payments").upsert(payRow, { onConflict: "id" }),
+                );
+                if (!retryErr) payErr = null;
+                else payErr = retryErr;
+              }
+            }
           } catch (e) {
             console.warn(
               "Fallback resolve payment duplicate note:",
@@ -803,9 +920,14 @@ async function pushRecordsToSupabase(payload) {
           Array.isArray(pay.allocations) &&
           pay.allocations.length > 0
         ) {
+          await client
+            .from("payment_allocations")
+            .delete()
+            .eq("payment_id", payIdToUse);
+
           const allocRows = pay.allocations.map((a, idx) => ({
-            id: `${pay.id}-alloc-${idx}`,
-            payment_id: pay.id,
+            id: a.id ? `${payIdToUse}-${a.id}` : `${payIdToUse}-alloc-${idx}`,
+            payment_id: payIdToUse,
             invoice_id: a.invoiceId || "",
             invoice_number: a.invoiceNumber || "",
             po_number: a.poNumber || "",
