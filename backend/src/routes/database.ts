@@ -18,6 +18,7 @@ import { requireAuth } from '../middleware/auth';
 import { requireAdmin } from '../middleware/rbac';
 import { addSseClient, removeSseClient, broadcast } from '../services/sseHub';
 import { hashSecret } from '../services/authService';
+import { recalculateInvoice, recalculateDeliveryNote } from '../services/totals';
 
 const router = Router();
 
@@ -622,6 +623,31 @@ router.post('/bulk-sync', requireAuth, async (req, res) => {
 
   broadcast({ type: 'sync_notification', entity: 'bulk' });
   res.json({ success: true });
+});
+
+router.post('/recalculate-totals', requireAuth, async (_req, res) => {
+  const [invoices, deliveryNotes] = await Promise.all([
+    Invoice.findAll({ attributes: ['id'] }),
+    DeliveryNote.findAll({ attributes: ['id'] }),
+  ]);
+  let updatedInvoicesCount = 0;
+  let updatedDNsCount = 0;
+  for (const inv of invoices) {
+    // eslint-disable-next-line no-await-in-loop
+    if (await sequelize.transaction((t) => recalculateInvoice(inv.id, t))) updatedInvoicesCount += 1;
+  }
+  for (const dn of deliveryNotes) {
+    // eslint-disable-next-line no-await-in-loop
+    if (await sequelize.transaction((t) => recalculateDeliveryNote(dn.id, t))) updatedDNsCount += 1;
+  }
+  if (updatedInvoicesCount || updatedDNsCount) broadcast({ type: 'sync_notification', entity: 'bulk' });
+  res.json({
+    success: true,
+    updatedInvoicesCount,
+    updatedDNsCount,
+    totalInvoices: invoices.length,
+    totalDeliveryNotes: deliveryNotes.length,
+  });
 });
 
 router.post('/clear-all', requireAuth, requireAdmin, async (_req, res) => {

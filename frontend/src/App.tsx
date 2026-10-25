@@ -251,7 +251,7 @@ export default function App() {
 
   // MySQL is now the single source of truth, so this simply replaces local state
   // with whatever the server returns — no more 3-way merge/tombstone logic
-  // (that existed only to reconcile the old JSON-file/Supabase/Sheets stores).
+  // (that existed only to reconcile the old JSON-file stores).
   // Staleness is guarded upstream in fetchFullDatabaseGuarded (see dataGenerationRef)
   // rather than here, since comparing server updatedAt timestamps against a
   // client-stamped "last write" time is vulnerable to clock skew: the client's
@@ -491,7 +491,7 @@ export default function App() {
     source?: string;
   }) => {
     // `users`/`seriesConfig`/`deletedIds`/`source` were only meaningful under the old
-    // JSON-file/Supabase merge design; MySQL's per-entity tables (and the users/sync +
+    // JSON-file merge design; MySQL's per-entity tables (and the users/sync +
     // series-config routes) now own that state, so only the entity arrays below are
     // forwarded to the backend's bulk-sync endpoint.
     //
@@ -868,7 +868,7 @@ export default function App() {
       pendingToast = ['warning', `Invoice "${invoiceToSave.invoiceNumber}" saved and flagged in Issue Resolution Hub.`];
     }
 
-    // Persist all data silently in the background to Server Database and Google Sheets without blocking UI
+    // Persist all data silently in the background to Server Database without blocking UI
     // Non-replace upsert, so only the touched rows need to go: sending the whole
     // invoices/issues tables made bulk-sync rewrite every record (and every invoice
     // line) per save and time out client-side.
@@ -1671,7 +1671,7 @@ export default function App() {
 
       await recalculateAllInvoiceTotalsOnServer();
 
-      // Push recalculated values to server master database and Supabase
+      // Push recalculated values to server master database
       await syncToMasterDatabase({
         invoices: recalculatedInvoices,
         deliveryNotes: recalculatedDNs,
@@ -1802,7 +1802,7 @@ export default function App() {
       pendingToast = ['info', `Delivery Note "${newDN.deliveryNoteNumber}" saved and automatically added to Issue Resolution Hub.`];
     }
 
-    // Persist all data simultaneously to Server Database & Google Sheets
+    // Persist all data simultaneously to Server Database
     const dnSaved = await syncToMasterDatabase({
       deliveryNotes: [newDN],
       issues: changedIssue ? [changedIssue] : [],
@@ -1888,7 +1888,7 @@ export default function App() {
       showToast('success', `Payment "${newPayment.paymentNumber}" of TZS ${formatCurrency(newPayment.amountPaid)} recorded and allocated.`);
     }
 
-    // Persist all data simultaneously to Server Database & Google Sheets
+    // Persist all data simultaneously to Server Database
     syncToMasterDatabase({
       payments: updatedPayments,
       invoices: updatedInvoices,

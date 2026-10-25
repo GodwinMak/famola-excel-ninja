@@ -39,8 +39,14 @@ router.post('/', requireScreen('po_master', 'edit'), async (req, res) => {
   res.status(201).json({ success: true, data: created });
 });
 
-router.delete('/', requireScreen('po_master', 'edit'), async (_req, res) => {
-  await PoLine.destroy({ where: {}, truncate: true });
+router.delete('/', requireScreen('po_master', 'edit'), async (req, res) => {
+  // ?poNumber=... removes just that PO; with no filter the whole PO master is cleared.
+  const poNumber = typeof req.query.poNumber === 'string' ? req.query.poNumber.trim() : '';
+  if (poNumber) {
+    await PoLine.destroy({ where: { poNumber } });
+  } else {
+    await PoLine.destroy({ where: {}, truncate: true });
+  }
   broadcast({ type: 'sync_notification', entity: 'po_lines' });
   res.json({ success: true });
 });

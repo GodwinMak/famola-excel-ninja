@@ -23,6 +23,9 @@ import seriesConfigRoutes from './routes/seriesConfig';
 import customerSeriesBookRoutes from './routes/customerSeriesBooks';
 import attachmentRoutes, { ATTACHMENTS_DIR } from './routes/attachments';
 import databaseRoutes from './routes/database';
+import appInfoRoutes from './routes/appInfo';
+import sourceZipRoutes from './routes/sourceZip';
+import aiRoutes from './routes/ai';
 
 const app = express();
 const PORT = Number(process.env.PORT) || 4000;
@@ -63,6 +66,9 @@ app.use('/api/customer-series-books', customerSeriesBookRoutes);
 app.use('/api/attachments', attachmentRoutes);
 app.use('/api/attachments', express.static(ATTACHMENTS_DIR));
 app.use('/api/database', databaseRoutes);
+app.use('/api/app-info', appInfoRoutes);
+app.use('/api/download-zip', sourceZipRoutes);
+app.use('/api/ai', aiRoutes);
 
 app.use(errorHandler);
 

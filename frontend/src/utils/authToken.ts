@@ -11,13 +11,9 @@ export const API_BASE = import.meta.env.DEV ? '' : (import.meta.env.VITE_API_BAS
 
 export const getAuthToken = (): string | null => {
   try {
-    const existing = localStorage.getItem(TOKEN_KEY);
-    if (existing) return existing;
-    const defaultToken = `famola_${btoa(JSON.stringify({ id: 'usr-admin-ninja', role: 'Admin', t: Date.now() }))}`;
-    localStorage.setItem(TOKEN_KEY, defaultToken);
-    return defaultToken;
+    return localStorage.getItem(TOKEN_KEY);
   } catch {
-    return 'famola_default_admin_token';
+    return null;
   }
 };
 

@@ -5,6 +5,7 @@ import { InvoiceLine } from '../models/InvoiceLine';
 import { requireAuth } from '../middleware/auth';
 import { requireScreen } from '../middleware/rbac';
 import { broadcast } from '../services/sseHub';
+import { recalculateInvoice } from '../services/totals';
 
 const router = Router();
 router.use(requireAuth);
@@ -176,6 +177,20 @@ router.delete('/:id', requireScreen('invoices_db', 'edit'), async (req, res) => 
   const invoice = await Invoice.findByPk(req.params.id);
   if (!invoice) return res.status(404).json({ success: false, error: 'Invoice not found' });
   await invoice.destroy();
+  broadcast({ type: 'sync_notification', entity: 'invoices' });
+  res.json({ success: true });
+});
+
+router.delete('/:id/lines/:lineId', requireScreen('invoices_db', 'edit'), async (req, res) => {
+  const invoice = await Invoice.findByPk(req.params.id);
+  if (!invoice) return res.status(404).json({ success: false, error: 'Invoice not found' });
+  // The client may identify the line by its own id or by the PO line it was billed from.
+  const { lineId } = req.params;
+  await sequelize.transaction(async (t) => {
+    await InvoiceLine.destroy({ where: { invoiceId: invoice.id, id: lineId }, transaction: t });
+    await InvoiceLine.destroy({ where: { invoiceId: invoice.id, poLineId: lineId }, transaction: t });
+    await recalculateInvoice(invoice.id, t);
+  });
   broadcast({ type: 'sync_notification', entity: 'invoices' });
   res.json({ success: true });
 });

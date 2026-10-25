@@ -13,6 +13,7 @@ import {
   downloadCsv, 
   exportFullSystemBackup 
 } from '../utils/backupExportService';
+import { authHeaders, API_BASE } from '../utils/authToken';
 import { loadStoredInvitations } from '../utils/authService';
 import { loadStoredSeriesConfig, loadStoredIssues } from '../utils/storage';
 import { 
@@ -103,20 +104,27 @@ export const MasterExportModal: React.FC<MasterExportModalProps> = ({
     setTimeout(() => setDownloadSuccess(null), 4000);
   };
 
-  const handleDownloadSourceZip = () => {
+  const handleDownloadSourceZip = async () => {
     setIsZipping(true);
-    const link = document.createElement('a');
-    link.href = '/api/download-zip';
-    link.setAttribute('download', 'famola-erp-source-code.zip');
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-
-    setTimeout(() => {
-      setIsZipping(false);
+    try {
+      const res = await fetch(`${API_BASE}/api/download-zip`, { headers: { ...authHeaders() } });
+      if (!res.ok) throw new Error(`Server returned ${res.status}`);
+      const url = URL.createObjectURL(await res.blob());
+      const link = document.createElement('a');
+      link.href = url;
+      link.setAttribute('download', 'famola-erp-source-code.zip');
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
       setDownloadSuccess('Full Project Source Code (.zip) download initiated!');
+    } catch (err) {
+      console.warn('Source zip download failed:', err);
+      setDownloadSuccess('Source code download failed (admin access required).');
+    } finally {
+      setIsZipping(false);
       setTimeout(() => setDownloadSuccess(null), 4000);
-    }, 1500);
+    }
   };
 
   const handleDownloadCsv = (type: 'po' | 'invoices' | 'deliveries' | 'payments') => {

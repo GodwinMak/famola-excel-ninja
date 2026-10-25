@@ -32,6 +32,7 @@ import {
   Eye,
   Info
 } from 'lucide-react';
+import { authHeaders, API_BASE } from '../utils/authToken';
 import { exportManagementReportToPdf } from '../utils/managementReportPdfExport';
 
 interface AIManagementReportModalProps {
@@ -360,9 +361,9 @@ export const AIManagementReportModal: React.FC<AIManagementReportModalProps> = (
         topFinancials: customerFinancials.slice(0, 10),
       };
 
-      const res = await fetch('/api/ai/management-report', {
+      const res = await fetch(`${API_BASE}/api/ai/management-report`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
         body: JSON.stringify(payload),
       });
 

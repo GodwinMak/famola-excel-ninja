@@ -5,6 +5,7 @@ import { DeliveryNoteLine } from '../models/DeliveryNoteLine';
 import { requireAuth } from '../middleware/auth';
 import { requireScreen } from '../middleware/rbac';
 import { broadcast } from '../services/sseHub';
+import { recalculateDeliveryNote } from '../services/totals';
 
 const router = Router();
 router.use(requireAuth);
@@ -164,6 +165,19 @@ router.delete('/:id', requireScreen('delivery_notes', 'edit'), async (req, res) 
   const dn = await DeliveryNote.findByPk(req.params.id);
   if (!dn) return res.status(404).json({ success: false, error: 'Delivery note not found' });
   await dn.destroy();
+  broadcast({ type: 'sync_notification', entity: 'delivery_notes' });
+  res.json({ success: true });
+});
+
+router.delete('/:id/lines/:lineId', requireScreen('delivery_notes', 'edit'), async (req, res) => {
+  const dn = await DeliveryNote.findByPk(req.params.id);
+  if (!dn) return res.status(404).json({ success: false, error: 'Delivery note not found' });
+  const { lineId } = req.params;
+  await sequelize.transaction(async (t) => {
+    await DeliveryNoteLine.destroy({ where: { deliveryNoteId: dn.id, id: lineId }, transaction: t });
+    await DeliveryNoteLine.destroy({ where: { deliveryNoteId: dn.id, poLineId: lineId }, transaction: t });
+    await recalculateDeliveryNote(dn.id, t);
+  });
   broadcast({ type: 'sync_notification', entity: 'delivery_notes' });
   res.json({ success: true });
 });

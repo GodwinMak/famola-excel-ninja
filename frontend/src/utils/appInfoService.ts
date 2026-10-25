@@ -4,6 +4,8 @@
  * the private developer container preview (ais-dev-*).
  */
 
+import { API_BASE } from './authToken';
+
 let cachedSharedUrl: string | null = null;
 
 export const fetchServerAppInfo = async (): Promise<{
@@ -12,7 +14,7 @@ export const fetchServerAppInfo = async (): Promise<{
   devUrl: string;
 } | null> => {
   try {
-    const res = await fetch('/api/app-info', {
+    const res = await fetch(`${API_BASE}/api/app-info`, {
       headers: { 'Accept': 'application/json' },
     });
     if (res.ok) {
