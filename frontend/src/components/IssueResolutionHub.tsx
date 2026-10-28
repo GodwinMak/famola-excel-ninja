@@ -38,6 +38,7 @@ import {
   FileText, 
   Truck, 
   CreditCard, 
+  Package,
   Eye, 
   Check, 
   RotateCcw, 
@@ -92,7 +93,7 @@ export const IssueResolutionHub: React.FC<IssueResolutionHubProps> = ({
   onSaveInvoice,
   onSaveDeliveryNote,
 }) => {
-  const [activeEntityType, setActiveEntityType] = useState<'ALL' | 'INVOICE' | 'DELIVERY' | 'PAYMENT'>('ALL');
+  const [activeEntityType, setActiveEntityType] = useState<'ALL' | 'INVOICE' | 'DELIVERY' | 'PAYMENT' | 'CALL_OF_ORDER'>('ALL');
   
   // Filters
   const [selectedCustomer, setSelectedCustomer] = useState<string>('ALL');
@@ -303,7 +304,17 @@ export const IssueResolutionHub: React.FC<IssueResolutionHubProps> = ({
   // Filter issues by active entity type, strictly preserving flagged items until marked RESOLVED
   const entityIssues = useMemo(() => {
     return (issues || []).filter((i) => {
-      if (activeEntityType !== 'ALL' && i.entityType !== activeEntityType) return false;
+      if (activeEntityType === 'CALL_OF_ORDER') {
+        const isCoo =
+          i.issueType === 'Call of Order' ||
+          i.primaryIssue === '[Call of Order]' ||
+          i.primaryIssue === 'Call of Order' ||
+          i.issueTitle?.includes('Call of Order') ||
+          (i.headerComment && i.headerComment.toLowerCase().includes('call of order'));
+        if (!isCoo) return false;
+      } else if (activeEntityType !== 'ALL' && i.entityType !== activeEntityType) {
+        return false;
+      }
       const refLower = (i.referenceNumber || '').trim().toLowerCase();
       if (i.entityType === 'INVOICE' && cancelledOrOfrInvoiceNumbers.has(refLower)) {
         return false;
@@ -506,11 +517,19 @@ export const IssueResolutionHub: React.FC<IssueResolutionHubProps> = ({
   // Global counts for the top tabs
   const tabCounts = useMemo(() => {
     const safeList = issues || [];
+    const isCooIssue = (i: DocumentIssueRecord) =>
+      i.issueType === 'Call of Order' ||
+      i.primaryIssue === '[Call of Order]' ||
+      i.primaryIssue === 'Call of Order' ||
+      i.issueTitle?.includes('Call of Order') ||
+      (i.headerComment && i.headerComment.toLowerCase().includes('call of order'));
+
     return {
       allActive: safeList.filter((i) => i.status !== 'RESOLVED').length,
       invoiceActive: safeList.filter((i) => i.entityType === 'INVOICE' && i.status !== 'RESOLVED').length,
       deliveryActive: safeList.filter((i) => i.entityType === 'DELIVERY' && i.status !== 'RESOLVED').length,
       paymentActive: safeList.filter((i) => i.entityType === 'PAYMENT' && i.status !== 'RESOLVED').length,
+      callOfOrderActive: safeList.filter((i) => isCooIssue(i) && i.status !== 'RESOLVED').length,
     };
   }, [issues]);
 
@@ -951,6 +970,30 @@ export const IssueResolutionHub: React.FC<IssueResolutionHubProps> = ({
               activeEntityType === 'PAYMENT' ? 'bg-white text-emerald-700' : 'bg-amber-100 text-amber-800'
             }`}>
               {tabCounts.paymentActive}
+            </span>
+          )}
+        </button>
+
+        <button
+          onClick={() => {
+            setActiveEntityType('CALL_OF_ORDER');
+            setSelectedCustomer('ALL');
+            setSelectedPo('ALL');
+            setIssuesPage(1);
+          }}
+          className={`px-4 py-2.5 rounded-xl text-xs font-bold transition-all flex items-center gap-2 cursor-pointer ${
+            activeEntityType === 'CALL_OF_ORDER'
+              ? 'bg-blue-600 text-white shadow-md shadow-blue-500/20'
+              : 'bg-white text-slate-700 hover:bg-slate-100 border border-slate-200'
+          }`}
+        >
+          <Package className="w-4 h-4 text-blue-500" />
+          <span>Call of Order</span>
+          {tabCounts.callOfOrderActive > 0 && (
+            <span className={`px-2 py-0.5 rounded-full text-[10px] font-extrabold ${
+              activeEntityType === 'CALL_OF_ORDER' ? 'bg-white text-blue-700' : 'bg-blue-100 text-blue-800'
+            }`}>
+              {tabCounts.callOfOrderActive}
             </span>
           )}
         </button>
@@ -1545,12 +1588,23 @@ export const IssueResolutionHub: React.FC<IssueResolutionHubProps> = ({
                         {/* 6. Description */}
                         <td className="py-3 px-3 min-w-[200px] max-w-xs">
                           <div className="flex flex-col gap-0.5">
-                            <div 
-                              className="font-semibold text-slate-900 truncate"
-                              title={flaggedReason}
-                            >
-                              {flaggedReason}
-                            </div>
+                            {issue.issueType === 'Call of Order' || flaggedReason === '[Call of Order]' || flaggedReason === 'Call of Order' ? (
+                              <div className="flex items-center gap-1.5">
+                                <span className="px-2 py-0.5 rounded text-[10px] font-extrabold bg-blue-100 text-blue-800 border border-blue-200">
+                                  [Call of Order]
+                                </span>
+                                <span className="text-slate-800 font-semibold text-xs truncate">
+                                  Manual Items Dispatch
+                                </span>
+                              </div>
+                            ) : (
+                              <div 
+                                className="font-semibold text-slate-900 truncate"
+                                title={flaggedReason}
+                              >
+                                {flaggedReason}
+                              </div>
+                            )}
                             {comment ? (
                               <div 
                                 className="text-[11px] text-slate-600 font-medium truncate" 

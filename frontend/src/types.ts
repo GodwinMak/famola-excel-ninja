@@ -117,6 +117,7 @@ export interface DocumentAttachment {
 }
 
 export interface DeliveryNoteLineItem {
+  id?: string;
   poLineId: string;
   itemDescription: string;
   unitOfMeasure: string;
@@ -262,6 +263,7 @@ export interface DocumentIssueRecord {
     | 'Damaged / Rejected Goods' 
     | 'Payment Mismatch' 
     | 'Customer Query' 
+    | 'Call of Order'
     | 'Other';
   severity: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
   status: 'PENDING' | 'UNDER_REVIEW' | 'RESOLVED';

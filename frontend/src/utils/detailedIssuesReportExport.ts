@@ -69,6 +69,9 @@ export const getCleanIssueTitle = (issue: {
   lineIssues?: Array<{ issueComment?: string; itemDescription?: string }>;
   entityType?: string;
 }): string => {
+  if (issue.issueType === 'Call of Order' || issue.primaryIssue === '[Call of Order]' || issue.primaryIssue === 'Call of Order') {
+    return 'Call of Order';
+  }
   if (issue.primaryIssue && !isGenericIssueText(issue.primaryIssue)) {
     return issue.primaryIssue.trim();
   }
@@ -104,6 +107,16 @@ export const getIssueReasonAndComment = (
   matchedDN?: DeliveryNoteRecord | null,
   matchedInvoice?: InvoiceRecord | null
 ): IssueReasonAndComment => {
+  if (issue.issueType === 'Call of Order' || issue.primaryIssue === '[Call of Order]') {
+    const manualSummary = matchedDN?.lines && matchedDN.lines.length > 0
+      ? `${matchedDN.lines.length} items recorded (${matchedDN.lines.map(l => `${l.itemDescription} (${l.deliveredQuantity} ${l.unitOfMeasure || 'UNIT'})`).slice(0, 3).join(', ')}${matchedDN.lines.length > 3 ? '...' : ''})`
+      : 'Pending Purchase Order';
+    return {
+      flaggedReason: '[Call of Order]',
+      comment: (issue.headerComment && !issue.headerComment.includes('Discrepancy flagged')) ? issue.headerComment : manualSummary,
+    };
+  }
+
   // 1. Determine clean Flagged Reason
   const flaggedReason = getCleanIssueTitle(issue);
 

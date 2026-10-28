@@ -67,7 +67,9 @@ import {
   AlertTriangle,
   Image as ImageIcon,
   Database,
-  Upload
+  Upload,
+  Link2,
+  Check
 } from 'lucide-react';
 import { DeliveryNotePrintModal } from './DeliveryNotePrintModal';
 import { isAdminUser, canEditScreen, canDeleteData, canLoadDatabase } from '../utils/authService';
@@ -278,6 +280,16 @@ export const renderDeliveryLineCommentBadge = (line: DeliveryNoteLineItem, dn: D
   );
 };
 
+export const isCallOfOrderRecord = (dn: DeliveryNoteRecord): boolean => {
+  if (dn.isCallOfOrder) return true;
+  if (dn.status === 'CALL_OF_ORDER') return true;
+  const c = (dn.comment || '').toLowerCase();
+  const n = (dn.notes || '').toLowerCase();
+  const ic = (dn.issueComment || '').toLowerCase();
+  const s = (dn.status || '').toLowerCase();
+  return c.includes('call of order') || n.includes('call of order') || ic.includes('call of order') || s.includes('call of order');
+};
+
 interface DeliveryNotesManagerProps {
   deliveryNotes?: DeliveryNoteRecord[];
   poGroups?: PurchaseOrderGroup[];
@@ -292,9 +304,9 @@ interface DeliveryNotesManagerProps {
   editingDeliveryNote?: DeliveryNoteRecord | null;
   onCancelEdit?: () => void;
   onReloadDeliveryNote?: (dn: DeliveryNoteRecord) => void;
-  // Separate screen support: 'create' for Delivery (Issue Note), 'database' for Delivery Details
-  screenMode?: 'create' | 'database';
-  onNavigateScreen?: (mode: 'create' | 'database') => void;
+  // Separate screen support: 'create' for Delivery (Issue Note), 'database' for Delivery Details, 'call_of_order' for Call of Order
+  screenMode?: 'create' | 'database' | 'call_of_order';
+  onNavigateScreen?: (mode: 'create' | 'database' | 'call_of_order') => void;
   onViewDeliveryDetails?: () => void;
   onCreateNewDelivery?: () => void;
   preselectedPoNumber?: string;
@@ -325,7 +337,7 @@ export const DeliveryNotesManager: React.FC<DeliveryNotesManagerProps> = ({
   const isAdmin = isAdminUser(currentUser);
   const canLoadDB = canLoadDatabase(currentUser);
   const [isImportModalOpen, setIsImportModalOpen] = useState<boolean>(false);
-  const [internalMode, setInternalMode] = useState<'create' | 'database'>(screenMode || 'create');
+  const [internalMode, setInternalMode] = useState<'create' | 'database' | 'call_of_order'>(screenMode || 'create');
 
   useEffect(() => {
     if (screenMode) {
@@ -333,16 +345,18 @@ export const DeliveryNotesManager: React.FC<DeliveryNotesManagerProps> = ({
     }
   }, [screenMode]);
 
-  const viewMode = screenMode || internalMode;
+  const viewMode = internalMode;
 
-  const handleSwitchMode = (newMode: 'create' | 'database') => {
+  const handleSwitchMode = (newMode: 'create' | 'database' | 'call_of_order') => {
     setInternalMode(newMode);
-    if (onNavigateScreen) {
-      onNavigateScreen(newMode);
-    } else if (newMode === 'database' && onViewDeliveryDetails) {
-      onViewDeliveryDetails();
-    } else if (newMode === 'create' && onCreateNewDelivery) {
-      onCreateNewDelivery();
+    if (newMode !== 'call_of_order') {
+      if (onNavigateScreen) {
+        onNavigateScreen(newMode);
+      } else if (newMode === 'database' && onViewDeliveryDetails) {
+        onViewDeliveryDetails();
+      } else if (newMode === 'create' && onCreateNewDelivery) {
+        onCreateNewDelivery();
+      }
     }
   };
 
@@ -1821,6 +1835,400 @@ export const DeliveryNotesManager: React.FC<DeliveryNotesManagerProps> = ({
     return sortedAndFilteredDatabaseDNs.slice(start, start + dbPageSize);
   }, [sortedAndFilteredDatabaseDNs, dbPage, dbPageSize]);
 
+  // Call of Order State
+  const [cooSearchTerm, setCooSearchTerm] = useState<string>('');
+  const [cooCustomerFilter, setCooCustomerFilter] = useState<string>('ALL');
+  const [cooStatusFilter, setCooStatusFilter] = useState<string>('ALL'); // 'ALL' | 'PENDING_PO' | 'LINKED'
+  const [cooPage, setCooPage] = useState<number>(1);
+  const [cooPageSize, setCooPageSize] = useState<number>(25);
+
+  // Manual Item Lines Editor Modal State
+  const [isCooEditModalOpen, setIsCooEditModalOpen] = useState<boolean>(false);
+  const [cooEditingDN, setCooEditingDN] = useState<DeliveryNoteRecord | null>(null);
+  const [cooModalDNNumber, setCooModalDNNumber] = useState<string>('');
+  const [cooModalDate, setCooModalDate] = useState<string>('');
+  const [cooModalCustomer, setCooModalCustomer] = useState<string>('');
+  const [cooModalVehicle, setCooModalVehicle] = useState<string>('');
+  const [cooModalDriver, setCooModalDriver] = useState<string>('');
+  const [cooModalCarrier, setCooModalCarrier] = useState<string>('');
+  const [cooModalDestination, setCooModalDestination] = useState<string>('');
+  const [cooModalNotes, setCooModalNotes] = useState<string>('');
+  const [cooModalLines, setCooModalLines] = useState<
+    Array<{
+      id: string;
+      itemDescription: string;
+      deliveredQuantity: number;
+      unitOfMeasure: string;
+      unitPrice: number;
+      comment: string;
+    }>
+  >([]);
+  const [cooModalError, setCooModalError] = useState<string | null>(null);
+
+  // PO Linking Modal State
+  const [isCooLinkModalOpen, setIsCooLinkModalOpen] = useState<boolean>(false);
+  const [cooLinkingDN, setCooLinkingDN] = useState<DeliveryNoteRecord | null>(null);
+  const [cooSelectedPoNumber, setCooSelectedPoNumber] = useState<string>('');
+  const [cooLineMappings, setCooLineMappings] = useState<Record<string, string>>({}); // manual line id -> poLineId
+  const [cooLinkError, setCooLinkError] = useState<string | null>(null);
+
+  const callOfOrderDNs = useMemo(() => {
+    return deliveryNotes.filter(isCallOfOrderRecord);
+  }, [deliveryNotes]);
+
+  const filteredCallOfOrderDNs = useMemo(() => {
+    return callOfOrderDNs
+      .filter((dn) => {
+        const matchSearch =
+          !cooSearchTerm ||
+          dn.deliveryNoteNumber.toLowerCase().includes(cooSearchTerm.toLowerCase()) ||
+          dn.customerName.toLowerCase().includes(cooSearchTerm.toLowerCase()) ||
+          (dn.vehicleNumber && dn.vehicleNumber.toLowerCase().includes(cooSearchTerm.toLowerCase())) ||
+          (dn.driverName && dn.driverName.toLowerCase().includes(cooSearchTerm.toLowerCase())) ||
+          (dn.carrier && dn.carrier.toLowerCase().includes(cooSearchTerm.toLowerCase())) ||
+          (dn.lines && dn.lines.some((l) => (l.itemDescription || '').toLowerCase().includes(cooSearchTerm.toLowerCase())));
+
+        const matchCustomer = cooCustomerFilter === 'ALL' || dn.customerName === cooCustomerFilter;
+
+        let matchStatus = true;
+        const isLinked =
+          !dn.isCallOfOrder &&
+          dn.status !== 'CALL_OF_ORDER' &&
+          dn.poNumber &&
+          !dn.poNumber.toLowerCase().includes('pending') &&
+          !dn.poNumber.toLowerCase().includes('no po');
+        if (cooStatusFilter === 'PENDING_PO') {
+          matchStatus = !isLinked;
+        } else if (cooStatusFilter === 'LINKED') {
+          matchStatus = isLinked;
+        }
+
+        return matchSearch && matchCustomer && matchStatus;
+      })
+      .sort((a, b) => naturalCompare(a.deliveryNoteNumber, b.deliveryNoteNumber));
+  }, [callOfOrderDNs, cooSearchTerm, cooCustomerFilter, cooStatusFilter]);
+
+  const paginatedCallOfOrderDNs = useMemo(() => {
+    const start = (cooPage - 1) * cooPageSize;
+    return filteredCallOfOrderDNs.slice(start, start + cooPageSize);
+  }, [filteredCallOfOrderDNs, cooPage, cooPageSize]);
+
+  const cooMetrics = useMemo(() => {
+    const total = callOfOrderDNs.length;
+    const withItems = callOfOrderDNs.filter((d) => (d.lines?.length || 0) > 0).length;
+    const pendingPo = callOfOrderDNs.filter((d) => d.status === 'CALL_OF_ORDER' || d.isCallOfOrder).length;
+    const totalUnits = callOfOrderDNs.reduce(
+      (acc, d) => acc + (d.totalDeliveredQuantity || (d.lines || []).reduce((s, l) => s + (l.deliveredQuantity || 0), 0)),
+      0
+    );
+    return { total, withItems, pendingPo, totalUnits };
+  }, [callOfOrderDNs]);
+
+  // Call of Order Handlers
+  const handleOpenNewCallOfOrder = () => {
+    setCooEditingDN(null);
+    setCooModalCustomer(selectedCustomer !== 'ALL' ? selectedCustomer : (customers[0] || ''));
+    const cfg = loadStoredSeriesConfig();
+    const defaultDn = formatSeriesNumber(cfg.deliverySeries.prefix, cfg.deliverySeries.currentNumber, cfg.deliverySeries.padding);
+    setCooModalDNNumber(defaultDn);
+    setCooModalDate(new Date().toISOString().split('T')[0]);
+    setCooModalVehicle('');
+    setCooModalDriver('');
+    setCooModalCarrier('');
+    setCooModalDestination('');
+    setCooModalNotes('');
+    setCooModalLines([
+      {
+        id: `line-new-${Date.now()}-1`,
+        itemDescription: '',
+        deliveredQuantity: 0,
+        unitOfMeasure: 'PCS',
+        unitPrice: 0,
+        comment: '[Call of Order]',
+      },
+    ]);
+    setCooModalError(null);
+    setIsCooEditModalOpen(true);
+  };
+
+  const handleOpenEditCallOfOrder = (dn: DeliveryNoteRecord) => {
+    setCooEditingDN(dn);
+    setCooModalDNNumber(dn.deliveryNoteNumber);
+    setCooModalDate(dn.deliveryDate || new Date().toISOString().split('T')[0]);
+    setCooModalCustomer(dn.customerName);
+    setCooModalVehicle(dn.vehicleNumber || '');
+    setCooModalDriver(dn.driverName || '');
+    setCooModalCarrier(dn.carrier || '');
+    setCooModalDestination(dn.destination || '');
+    setCooModalNotes(dn.notes || '');
+    if (dn.lines && dn.lines.length > 0) {
+      setCooModalLines(
+        dn.lines.map((l, idx) => ({
+          id: l.id || `line-${idx}`,
+          itemDescription: l.itemDescription || '',
+          deliveredQuantity: l.deliveredQuantity || 0,
+          unitOfMeasure: l.unitOfMeasure || 'PCS',
+          unitPrice: l.unitPrice || 0,
+          comment: l.comment || '[Call of Order]',
+        }))
+      );
+    } else {
+      setCooModalLines([
+        {
+          id: `line-${Date.now()}-1`,
+          itemDescription: '',
+          deliveredQuantity: 0,
+          unitOfMeasure: 'PCS',
+          unitPrice: 0,
+          comment: '[Call of Order]',
+        },
+      ]);
+    }
+    setCooModalError(null);
+    setIsCooEditModalOpen(true);
+  };
+
+  const handleAddCooModalLine = () => {
+    setCooModalLines((prev) => [
+      ...prev,
+      {
+        id: `line-${Date.now()}-${prev.length + 1}`,
+        itemDescription: '',
+        deliveredQuantity: 0,
+        unitOfMeasure: 'PCS',
+        unitPrice: 0,
+        comment: '[Call of Order]',
+      },
+    ]);
+  };
+
+  const handleRemoveCooModalLine = (idx: number) => {
+    setCooModalLines((prev) => prev.filter((_, i) => i !== idx));
+  };
+
+  const handleUpdateCooModalLine = (idx: number, field: string, value: any) => {
+    setCooModalLines((prev) => {
+      const updated = [...prev];
+      updated[idx] = { ...updated[idx], [field]: value };
+      return updated;
+    });
+  };
+
+  const handleSaveCallOfOrderModal = () => {
+    const cleanNum = cooModalDNNumber.trim();
+    if (!cleanNum) {
+      setCooModalError('Delivery Note number cannot be empty.');
+      return;
+    }
+    const cleanCustomer = cooModalCustomer.trim();
+    if (!cleanCustomer) {
+      setCooModalError('Please select or specify a Customer.');
+      return;
+    }
+
+    const validLines = cooModalLines.filter(
+      (l) => l.itemDescription.trim() !== '' && Number(l.deliveredQuantity) > 0
+    );
+    if (validLines.length === 0) {
+      setCooModalError('Please enter at least one item line with a description and delivered quantity > 0.');
+      return;
+    }
+
+    const isDup = deliveryNotes.some(
+      (d) => (!cooEditingDN || d.id !== cooEditingDN.id) && d.deliveryNoteNumber.trim().toLowerCase() === cleanNum.toLowerCase()
+    );
+    if (isDup) {
+      setCooModalError(`Delivery Note number "${cleanNum}" is already in use by another delivery note.`);
+      return;
+    }
+
+    const updatedLines: DeliveryNoteLineItem[] = validLines.map((ml, idx) => {
+      const qty = Number(ml.deliveredQuantity) || 0;
+      const price = Number(ml.unitPrice) || 0;
+      const vb = Math.round(qty * price * 100) / 100;
+      const va = Math.round(vb * 0.18 * 100) / 100;
+      const vt = Math.round((vb + va) * 100) / 100;
+      return {
+        id: ml.id || `line-coo-${Date.now()}-${idx}`,
+        poLineId: ml.id ? `coo-${ml.id}` : `coo-line-${idx}`,
+        itemDescription: ml.itemDescription.trim(),
+        deliveredQuantity: qty,
+        poQuantity: 0, // 0 so it never depletes real PO lines before linking
+        unitOfMeasure: ml.unitOfMeasure || 'PCS',
+        unitPrice: price,
+        vatRate: 0.18,
+        valueBeforeVat: vb,
+        vatAmount: va,
+        valueAfterVat: vt,
+        comment: ml.comment || '[Call of Order]',
+        hasIssue: true,
+        issueComment: `[Call of Order] ${ml.itemDescription.trim()}: ${qty} dispatched pending PO`,
+      };
+    });
+
+    const totQty = updatedLines.reduce((acc, l) => acc + l.deliveredQuantity, 0);
+    const totVal = Math.round(updatedLines.reduce((acc, l) => acc + (l.valueAfterVat || 0), 0) * 100) / 100;
+
+    const baseDN = cooEditingDN || {
+      id: `dn-coo-${Date.now()}`,
+      createdAt: new Date().toISOString(),
+      createdBy: currentUser ? `${currentUser.name} (${currentUser.role})` : 'User',
+    };
+
+    const updatedRecord: DeliveryNoteRecord = {
+      ...baseDN,
+      id: baseDN.id,
+      deliveryNoteNumber: cleanNum,
+      deliveryDate: cooModalDate || new Date().toISOString().split('T')[0],
+      customerName: cleanCustomer,
+      vehicleNumber: cooModalVehicle.trim(),
+      driverName: cooModalDriver.trim(),
+      carrier: cooModalCarrier.trim(),
+      destination: cooModalDestination.trim(),
+      notes: cooModalNotes.trim() || '[Call of Order]',
+      poNumber:
+        cooEditingDN?.poNumber && !cooEditingDN.poNumber.includes('No PO')
+          ? cooEditingDN.poNumber
+          : 'Call of Order (Pending PO)',
+      status: 'CALL_OF_ORDER',
+      isCallOfOrder: true,
+      hasIssue: true,
+      issueComment: '[Call of Order] Dispatched without PO - pending PO linking',
+      comment: '[Call of Order]',
+      lines: updatedLines,
+      totalDeliveredQuantity: totQty,
+      totalDeliveredValue: totVal,
+      updatedAt: new Date().toISOString(),
+      lastModifiedBy: currentUser ? `${currentUser.name} (${currentUser.role})` : 'User',
+    };
+
+    onSaveDeliveryNote(updatedRecord);
+    setIsCooEditModalOpen(false);
+    setCooEditingDN(null);
+    setCooModalError(null);
+  };
+
+  const handleOpenLinkPoModal = (dn: DeliveryNoteRecord) => {
+    setCooLinkingDN(dn);
+    setCooLinkError(null);
+    const custPOs = poGroups.filter((g) => g.customerName === dn.customerName);
+    const firstPo = custPOs[0]?.poNumber || '';
+    setCooSelectedPoNumber(firstPo);
+
+    const mappings: Record<string, string> = {};
+    if (firstPo && dn.lines) {
+      const poObj = custPOs.find((g) => g.poNumber === firstPo);
+      const lines = poObj?.lines || [];
+      dn.lines.forEach((l, idx) => {
+        const lineKey = l.id || l.poLineId || `line-${idx}`;
+        const desc = (l.itemDescription || '').toLowerCase().trim();
+        const found = lines.find((pl) => pl.itemDescription.toLowerCase().trim() === desc);
+        if (found) {
+          mappings[lineKey] = found.id;
+        } else if (lines.length === 1) {
+          mappings[lineKey] = lines[0].id;
+        }
+      });
+    }
+    setCooLineMappings(mappings);
+    setIsCooLinkModalOpen(true);
+  };
+
+  const handleConfirmLinkPo = () => {
+    if (!cooLinkingDN) return;
+    if (!cooSelectedPoNumber) {
+      setCooLinkError('Please select a Purchase Order to link this Call of Order note.');
+      return;
+    }
+
+    const poObj = poGroups.find((g) => g.poNumber === cooSelectedPoNumber);
+    if (!poObj) {
+      setCooLinkError(`Purchase Order ${cooSelectedPoNumber} was not found.`);
+      return;
+    }
+
+    const updatedLines: DeliveryNoteLineItem[] = (cooLinkingDN.lines || []).map((l, idx) => {
+      const lineKey = l.id || l.poLineId || `line-${idx}`;
+      const mappedPoLineId = cooLineMappings[lineKey];
+      const matchedPoLine =
+        (poObj.lines || []).find((pl) => pl.id === mappedPoLineId) ||
+        (allPoLines || []).find((pl) => pl.id === mappedPoLineId);
+      if (matchedPoLine) {
+        const qty = l.deliveredQuantity;
+        const price = matchedPoLine.unitPrice || l.unitPrice || 0;
+        const vRate = matchedPoLine.vatRate ?? 0.18;
+        const vb = Math.round(qty * price * 100) / 100;
+        const va = Math.round(vb * vRate * 100) / 100;
+        const vt = Math.round((vb + va) * 100) / 100;
+        return {
+          ...l,
+          poLineId: matchedPoLine.id,
+          itemDescription: matchedPoLine.itemDescription || l.itemDescription,
+          unitOfMeasure: matchedPoLine.unitOfMeasure || l.unitOfMeasure,
+          unitPrice: price,
+          vatRate: vRate,
+          poQuantity: matchedPoLine.orderedQuantity || 0,
+          valueBeforeVat: vb,
+          vatAmount: va,
+          valueAfterVat: vt,
+          comment: `Linked from Call of Order to PO ${cooSelectedPoNumber}`,
+          hasIssue: false,
+          issueComment: undefined,
+        };
+      }
+      return l;
+    });
+
+    const totQty = updatedLines.reduce((acc, l) => acc + l.deliveredQuantity, 0);
+    const totVal = Math.round(updatedLines.reduce((acc, l) => acc + (l.valueAfterVat || 0), 0) * 100) / 100;
+
+    const updatedDN: DeliveryNoteRecord = {
+      ...cooLinkingDN,
+      poNumber: cooSelectedPoNumber,
+      status: 'ACTIVE',
+      isCallOfOrder: false,
+      hasIssue: false,
+      comment: `Linked from Call of Order to PO ${cooSelectedPoNumber}`,
+      issueComment: undefined,
+      lines: updatedLines,
+      totalDeliveredQuantity: totQty,
+      totalDeliveredValue: totVal,
+      updatedAt: new Date().toISOString(),
+      lastModifiedBy: currentUser ? `${currentUser.name} (${currentUser.role})` : 'User',
+    };
+
+    onSaveDeliveryNote(updatedDN);
+    setIsCooLinkModalOpen(false);
+    setCooLinkingDN(null);
+    setCooLinkError(null);
+  };
+
+  const handleExportCallOfOrdersExcel = () => {
+    const dataToExport = filteredCallOfOrderDNs.map((dn) => {
+      const itemsStr = (dn.lines || []).map((l) => `${l.deliveredQuantity} ${l.unitOfMeasure || 'PCS'} - ${l.itemDescription}`).join('; ');
+      return {
+        'Delivery Note #': dn.deliveryNoteNumber,
+        'Delivery Date': dn.deliveryDate,
+        'Customer Name': dn.customerName,
+        'PO Number': dn.poNumber || 'Pending PO Linking',
+        'Vehicle Number': dn.vehicleNumber || '',
+        'Driver Name': dn.driverName || '',
+        'Carrier': dn.carrier || '',
+        'Destination': dn.destination || '',
+        'Total Delivered Qty': dn.totalDeliveredQuantity || (dn.lines || []).reduce((s, l) => s + (l.deliveredQuantity || 0), 0),
+        'Item Lines': itemsStr || 'No lines entered',
+        'Status': dn.isCallOfOrder ? 'CALL OF ORDER (PENDING PO)' : dn.status,
+        'Issue Classification': '[Call of Order] Items Dispatched Pending PO',
+        'Notes / Comment': dn.comment || dn.notes || '',
+      };
+    });
+
+    const worksheet = XLSX.utils.json_to_sheet(dataToExport);
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, 'Call of Orders');
+    XLSX.writeFile(workbook, `Call_of_Orders_Report_${new Date().toISOString().split('T')[0]}.xlsx`);
+  };
+
   return (
     <div className="space-y-6 pb-12">
       {/* Sub-navigation Tabs */}
@@ -1848,9 +2256,39 @@ export const DeliveryNotesManager: React.FC<DeliveryNotesManagerProps> = ({
             <Database className="w-4 h-4" />
             Delivery Details ({deliveryNotes.length})
           </button>
+          <button
+            onClick={() => handleSwitchMode('call_of_order')}
+            className={`px-4 py-2 rounded-xl font-bold text-xs flex items-center gap-2 transition-all cursor-pointer ${
+              viewMode === 'call_of_order'
+                ? 'bg-blue-600 text-white shadow-sm shadow-blue-500/20'
+                : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-50'
+            }`}
+          >
+            <Package className="w-4 h-4" />
+            Call of Order ({callOfOrderDNs.length})
+          </button>
         </div>
 
         <div className="flex items-center gap-2">
+          {viewMode === 'call_of_order' && (
+            <>
+              <button
+                type="button"
+                onClick={handleOpenNewCallOfOrder}
+                className="px-3.5 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 shadow-xs cursor-pointer transition-colors"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                New Call of Order
+              </button>
+              <button
+                onClick={handleExportCallOfOrdersExcel}
+                className="px-3.5 py-2 bg-slate-800 hover:bg-slate-700 text-white rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 shadow-xs cursor-pointer transition-colors"
+              >
+                <Download className="w-3.5 h-3.5" />
+                Export Call of Orders
+              </button>
+            </>
+          )}
           {viewMode === 'database' && (
             <>
               <button
@@ -1894,7 +2332,7 @@ export const DeliveryNotesManager: React.FC<DeliveryNotesManagerProps> = ({
         </div>
       </div>
 
-      {viewMode === 'create' ? (
+      {viewMode === 'create' && (
         <div className="space-y-6">
           {/* Success Banner */}
           {successSavedDN && (
@@ -2672,7 +3110,9 @@ export const DeliveryNotesManager: React.FC<DeliveryNotesManagerProps> = ({
             )}
           </div>
         </div>
-      ) : (
+      )}
+
+      {viewMode === 'database' && (
         /* Database View */
         <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden p-5 space-y-4">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
@@ -3075,6 +3515,839 @@ export const DeliveryNotesManager: React.FC<DeliveryNotesManagerProps> = ({
               onPageSizeChange={setDbPageSize}
               itemLabel="Delivery Notes"
             />
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================================= */}
+      {/* CALL OF ORDER VIEW                                                        */}
+      {/* ========================================================================= */}
+      {viewMode === 'call_of_order' && (
+        <div className="space-y-5">
+          {/* 4 KPI Cards */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+            <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-xs flex items-center justify-between">
+              <div>
+                <p className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider">
+                  Total Call of Orders
+                </p>
+                <p className="text-2xl font-bold text-slate-900 mt-1">{callOfOrderDNs.length.toLocaleString()}</p>
+                <p className="text-[11px] text-blue-600 font-medium mt-0.5">Physical book series checked</p>
+              </div>
+              <div className="w-12 h-12 rounded-xl bg-blue-50 text-blue-600 flex items-center justify-center shrink-0 border border-blue-100">
+                <Package className="w-6 h-6" />
+              </div>
+            </div>
+
+            <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-xs flex items-center justify-between">
+              <div>
+                <p className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider">
+                  With Items Recorded
+                </p>
+                <p className="text-2xl font-bold text-emerald-700 mt-1">{cooMetrics.withItems.toLocaleString()}</p>
+                <p className="text-[11px] text-emerald-600 font-medium mt-0.5">Manual line items entered</p>
+              </div>
+              <div className="w-12 h-12 rounded-xl bg-emerald-50 text-emerald-600 flex items-center justify-center shrink-0 border border-emerald-100">
+                <CheckCircle2 className="w-6 h-6" />
+              </div>
+            </div>
+
+            <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-xs flex items-center justify-between">
+              <div>
+                <p className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider">
+                  Pending PO Linking
+                </p>
+                <p className="text-2xl font-bold text-amber-700 mt-1">{cooMetrics.pendingPo.toLocaleString()}</p>
+                <p className="text-[11px] text-amber-600 font-medium mt-0.5">In Hub under [Call of Order]</p>
+              </div>
+              <div className="w-12 h-12 rounded-xl bg-amber-50 text-amber-600 flex items-center justify-center shrink-0 border border-amber-100">
+                <Clock className="w-6 h-6" />
+              </div>
+            </div>
+
+            <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-xs flex items-center justify-between">
+              <div>
+                <p className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider">
+                  Total Units Dispatched
+                </p>
+                <p className="text-2xl font-bold text-indigo-700 mt-1">{cooMetrics.totalUnits.toLocaleString()}</p>
+                <p className="text-[11px] text-indigo-600 font-medium mt-0.5">Urgent stock dispatches</p>
+              </div>
+              <div className="w-12 h-12 rounded-xl bg-indigo-50 text-indigo-600 flex items-center justify-center shrink-0 border border-indigo-100">
+                <Truck className="w-6 h-6" />
+              </div>
+            </div>
+          </div>
+
+          {/* Call of Order Explanatory Banner */}
+          <div className="bg-gradient-to-r from-blue-50 via-indigo-50 to-slate-50 border border-blue-200 rounded-xl p-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 text-xs">
+            <div className="flex items-start gap-3">
+              <div className="p-2 bg-blue-600 text-white rounded-lg shrink-0 mt-0.5">
+                <Package className="w-4 h-4" />
+              </div>
+              <div>
+                <h4 className="font-bold text-blue-950 text-sm">Call of Order Book Serial Tracking</h4>
+                <p className="text-slate-600 mt-0.5 leading-relaxed">
+                  Displays all delivery notes issued or marked as <span className="font-semibold text-blue-700">[Call of Order]</span> from physical serial books. You can add or edit item names &amp; delivered quantities manually. These entries are logged in the <strong>Issue Resolution Hub</strong> under the dedicated <span className="px-1.5 py-0.5 rounded bg-blue-100 text-blue-800 font-bold font-mono text-[10px]">[Call of Order]</span> category without depleting standard PO line balances until officially linked to a Purchase Order.
+                </p>
+              </div>
+            </div>
+            {onViewIssuesTab && (
+              <button
+                type="button"
+                onClick={onViewIssuesTab}
+                className="px-3.5 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-bold text-xs shrink-0 inline-flex items-center gap-1.5 shadow-xs cursor-pointer transition-colors"
+              >
+                <ShieldAlert className="w-3.5 h-3.5" />
+                View in Resolution Hub
+              </button>
+            )}
+          </div>
+
+          {/* Filter & Toolbar */}
+          <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-4 space-y-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="relative">
+                  <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                  <input
+                    type="text"
+                    value={cooSearchTerm}
+                    onChange={(e) => {
+                      setCooSearchTerm(e.target.value);
+                      setCooPage(1);
+                    }}
+                    placeholder="Search DN #, Customer, Item, Driver..."
+                    className="pl-8 pr-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs w-64 focus:outline-none focus:border-blue-500 font-medium"
+                  />
+                </div>
+
+                <select
+                  value={cooCustomerFilter}
+                  onChange={(e) => {
+                    setCooCustomerFilter(e.target.value);
+                    setCooPage(1);
+                  }}
+                  className="px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs focus:outline-none focus:border-blue-500 font-medium"
+                >
+                  <option value="ALL">All Customers ({customers.length})</option>
+                  {customers.map((c) => (
+                    <option key={c} value={c}>
+                      {c}
+                    </option>
+                  ))}
+                </select>
+
+                <select
+                  value={cooStatusFilter}
+                  onChange={(e) => {
+                    setCooStatusFilter(e.target.value);
+                    setCooPage(1);
+                  }}
+                  className="px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs focus:outline-none focus:border-blue-500 font-medium"
+                >
+                  <option value="ALL">All PO Statuses</option>
+                  <option value="PENDING_PO">Pending PO Linking</option>
+                  <option value="LINKED">Linked to PO</option>
+                </select>
+              </div>
+
+              <div className="flex items-center gap-3">
+                <span className="text-xs text-slate-500">
+                  Showing <strong>{filteredCallOfOrderDNs.length}</strong> of {callOfOrderDNs.length} Call of Orders
+                </span>
+                <button
+                  type="button"
+                  onClick={handleExportCallOfOrdersExcel}
+                  className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer transition-colors"
+                >
+                  <Download className="w-3.5 h-3.5 text-slate-500" />
+                  Export Excel
+                </button>
+                <button
+                  type="button"
+                  onClick={handleOpenNewCallOfOrder}
+                  className="px-3.5 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-xs font-bold inline-flex items-center gap-1.5 shadow-xs cursor-pointer transition-colors"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  New Call of Order
+                </button>
+              </div>
+            </div>
+
+            {/* Call of Orders Table */}
+            <div className="border border-slate-200 rounded-xl overflow-hidden shadow-xs">
+              <div className="overflow-auto max-h-[620px] scrollbar-thin">
+                <table className="w-full text-left text-xs border-collapse">
+                  <thead className="bg-slate-900 text-white font-semibold uppercase text-[10px] sticky top-0 z-20 shadow-sm whitespace-nowrap">
+                    <tr>
+                      <th className="py-2.5 px-3">DN Number</th>
+                      <th className="py-2.5 px-3">Delivery Date</th>
+                      <th className="py-2.5 px-3">Customer</th>
+                      <th className="py-2.5 px-3">Vehicle &amp; Driver</th>
+                      <th className="py-2.5 px-3 min-w-[260px]">Item Lines &amp; Delivered Quantities</th>
+                      <th className="py-2.5 px-3 text-right">Total Delivered Qty</th>
+                      <th className="py-2.5 px-3">PO Status</th>
+                      <th className="py-2.5 px-3">Issue Category</th>
+                      <th className="py-2.5 px-3 text-center">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {filteredCallOfOrderDNs.length === 0 ? (
+                      <tr>
+                        <td colSpan={9} className="py-12 text-center text-slate-400">
+                          <Package className="w-8 h-8 text-slate-300 mx-auto mb-2" />
+                          <p className="font-semibold text-slate-600">No Call of Order delivery notes match your filter.</p>
+                          <p className="text-xs text-slate-400 mt-1">
+                            Click "+ New Call of Order" to record an emergency book serial dispatch.
+                          </p>
+                        </td>
+                      </tr>
+                    ) : (
+                      paginatedCallOfOrderDNs.map((dn) => {
+                        const isLinked =
+                          !dn.isCallOfOrder &&
+                          dn.status !== 'CALL_OF_ORDER' &&
+                          dn.poNumber &&
+                          !dn.poNumber.toLowerCase().includes('pending') &&
+                          !dn.poNumber.toLowerCase().includes('no po');
+                        const lineCount = dn.lines?.length || 0;
+                        const totalQty =
+                          dn.totalDeliveredQuantity ||
+                          (dn.lines || []).reduce((acc, l) => acc + (Number(l.deliveredQuantity) || 0), 0);
+
+                        return (
+                          <tr key={dn.id} className="hover:bg-slate-50 transition-colors">
+                            {/* DN Number */}
+                            <td className="py-2 px-3 whitespace-nowrap">
+                              <div className="flex items-center gap-1.5 font-mono font-bold text-blue-700">
+                                <span>{dn.deliveryNoteNumber}</span>
+                                <span className="px-1.5 py-0.5 rounded text-[9px] bg-blue-100 text-blue-800 font-bold tracking-tight">
+                                  Call of Order
+                                </span>
+                              </div>
+                            </td>
+
+                            {/* Delivery Date */}
+                            <td className="py-2 px-3 whitespace-nowrap text-slate-600">
+                              {dn.deliveryDate || '—'}
+                            </td>
+
+                            {/* Customer */}
+                            <td className="py-2 px-3 whitespace-nowrap font-medium text-slate-800">
+                              {dn.customerName}
+                            </td>
+
+                            {/* Vehicle & Driver */}
+                            <td className="py-2 px-3 whitespace-nowrap text-slate-600">
+                              <div className="flex flex-col">
+                                <span className="font-mono text-slate-700 font-semibold">{dn.vehicleNumber || '—'}</span>
+                                {dn.driverName && (
+                                  <span className="text-[10px] text-slate-400">Driver: {dn.driverName}</span>
+                                )}
+                              </div>
+                            </td>
+
+                            {/* Item Lines & Delivered Quantities */}
+                            <td className="py-2 px-3">
+                              {lineCount > 0 ? (
+                                <div className="flex flex-wrap items-center gap-1.5 max-w-md">
+                                  {dn.lines!.slice(0, 3).map((line, idx) => (
+                                    <span
+                                      key={line.id || idx}
+                                      className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-slate-100 text-slate-800 border border-slate-200 text-[11px] font-medium"
+                                      title={line.itemDescription}
+                                    >
+                                      <Package className="w-3 h-3 text-blue-600 shrink-0" />
+                                      <span className="font-bold text-blue-900">{line.deliveredQuantity}</span>
+                                      <span className="text-[10px] text-slate-500">{line.unitOfMeasure || 'PCS'}</span>
+                                      <span className="truncate max-w-[120px]">{line.itemDescription}</span>
+                                    </span>
+                                  ))}
+                                  {lineCount > 3 && (
+                                    <span className="text-[10px] font-semibold text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded">
+                                      +{lineCount - 3} more
+                                    </span>
+                                  )}
+                                </div>
+                              ) : (
+                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-amber-50 text-amber-800 border border-amber-200 text-[11px] italic">
+                                  <AlertTriangle className="w-3 h-3 text-amber-600 shrink-0" />
+                                  No items entered — click Edit to add
+                                </span>
+                              )}
+                            </td>
+
+                            {/* Total Qty */}
+                            <td className="py-2 px-3 whitespace-nowrap text-right font-mono font-bold text-slate-800">
+                              {totalQty.toLocaleString()}
+                            </td>
+
+                            {/* PO Status */}
+                            <td className="py-2 px-3 whitespace-nowrap">
+                              {isLinked ? (
+                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-200">
+                                  <CheckCircle2 className="w-3 h-3 text-emerald-600 shrink-0" />
+                                  <span>PO: {dn.poNumber}</span>
+                                </span>
+                              ) : (
+                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-900 border border-amber-300">
+                                  <Clock className="w-3 h-3 text-amber-600 shrink-0" />
+                                  <span>Pending PO Linking</span>
+                                </span>
+                              )}
+                            </td>
+
+                            {/* Issue Category */}
+                            <td className="py-2 px-3 whitespace-nowrap">
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-bold bg-blue-100 text-blue-800 border border-blue-200">
+                                <ShieldAlert className="w-3 h-3 text-blue-600 shrink-0" />
+                                <span>[Call of Order]</span>
+                              </span>
+                            </td>
+
+                            {/* Actions */}
+                            <td className="py-2 px-3 whitespace-nowrap text-center">
+                              <div className="flex items-center justify-center gap-1.5">
+                                <button
+                                  type="button"
+                                  onClick={() => handleOpenEditCallOfOrder(dn)}
+                                  className="px-2.5 py-1 bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 rounded-lg text-xs font-semibold inline-flex items-center gap-1 cursor-pointer transition-colors"
+                                  title="Edit or add manual item lines and delivered quantities"
+                                >
+                                  <Edit3 className="w-3.5 h-3.5" />
+                                  <span>Edit Items</span>
+                                </button>
+
+                                <button
+                                  type="button"
+                                  onClick={() => handleOpenLinkPoModal(dn)}
+                                  className="px-2.5 py-1 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 rounded-lg text-xs font-semibold inline-flex items-center gap-1 cursor-pointer transition-colors"
+                                  title="Link to official Purchase Order line items and convert to standard delivery"
+                                >
+                                  <Link2 className="w-3.5 h-3.5" />
+                                  <span>Link PO</span>
+                                </button>
+
+                                <button
+                                  type="button"
+                                  onClick={() => setPrintingDN(dn)}
+                                  className="p-1 text-slate-500 hover:text-slate-800 hover:bg-slate-100 rounded-md cursor-pointer transition-colors"
+                                  title="Print Delivery Note"
+                                >
+                                  <Printer className="w-4 h-4" />
+                                </button>
+
+                                {canDeleteData(currentUser) && (
+                                  <button
+                                    type="button"
+                                    onClick={() => setDnPendingDelete(dn)}
+                                    className="p-1 text-rose-500 hover:text-rose-700 hover:bg-rose-50 rounded-md cursor-pointer transition-colors"
+                                    title="Delete Delivery Note"
+                                  >
+                                    <Trash2 className="w-4 h-4" />
+                                  </button>
+                                )}
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })
+                    )}
+                  </tbody>
+                </table>
+              </div>
+
+              <TablePagination
+                currentPage={cooPage}
+                totalItems={filteredCallOfOrderDNs.length}
+                pageSize={cooPageSize}
+                onPageChange={setCooPage}
+                onPageSizeChange={setCooPageSize}
+                itemLabel="Call of Orders"
+              />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================================= */}
+      {/* MODAL: EDIT / ADD CALL OF ORDER MANUAL ITEM LINES                         */}
+      {/* ========================================================================= */}
+      {isCooEditModalOpen && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs z-50 flex items-center justify-center p-3 sm:p-4">
+          <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 w-full max-w-4xl max-h-[92vh] flex flex-col overflow-hidden animate-in fade-in duration-150">
+            {/* Modal Header */}
+            <div className="px-5 py-3.5 bg-slate-900 text-white flex items-center justify-between shrink-0">
+              <div className="flex items-center gap-3">
+                <div className="p-2 bg-blue-500/20 text-blue-400 rounded-lg border border-blue-500/30">
+                  <Package className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="font-bold text-sm sm:text-base flex items-center gap-2">
+                    {cooEditingDN ? 'Edit Call of Order Items & Quantities' : 'New Call of Order Delivery Note'}
+                    <span className="font-mono text-blue-300 text-xs px-2 py-0.5 rounded bg-blue-500/20 border border-blue-500/30">
+                      {cooModalDNNumber || 'Draft'}
+                    </span>
+                  </h3>
+                  <p className="text-xs text-slate-400">
+                    Dispatched from physical serial book. Lines are logged under issue category [Call of Order] until linked to a PO.
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsCooEditModalOpen(false)}
+                className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-colors cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Modal Body */}
+            <div className="p-5 overflow-y-auto space-y-4 text-xs">
+              {cooModalError && (
+                <div className="p-3 bg-red-50 border border-red-300 rounded-xl text-red-700 flex items-center gap-2 text-xs font-semibold">
+                  <AlertCircle className="w-4 h-4 shrink-0 text-red-500" />
+                  <span>{cooModalError}</span>
+                </div>
+              )}
+
+              {/* Delivery Header Information */}
+              <div className="bg-slate-50 p-4 rounded-xl border border-slate-200 space-y-3">
+                <h4 className="font-bold text-slate-800 text-xs uppercase tracking-wide">
+                  Delivery Note Information
+                </h4>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  <div>
+                    <label className="font-semibold text-slate-700 block mb-1">
+                      Customer Name <span className="text-red-500">*</span>
+                    </label>
+                    <select
+                      value={cooModalCustomer}
+                      onChange={(e) => setCooModalCustomer(e.target.value)}
+                      className="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded-lg text-xs font-medium focus:ring-1 focus:ring-blue-500 focus:outline-none"
+                    >
+                      <option value="">Select Customer...</option>
+                      {customers.map((c) => (
+                        <option key={c} value={c}>
+                          {c}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="font-semibold text-slate-700 block mb-1">
+                      Delivery Note # <span className="text-red-500">*</span>
+                    </label>
+                    <input
+                      type="text"
+                      value={cooModalDNNumber}
+                      onChange={(e) => setCooModalDNNumber(e.target.value.toUpperCase())}
+                      placeholder="e.g. MRGR0381"
+                      className="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded-lg text-xs font-mono font-bold text-blue-700 focus:ring-1 focus:ring-blue-500 focus:outline-none"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="font-semibold text-slate-700 block mb-1">
+                      Delivery Date <span className="text-red-500">*</span>
+                    </label>
+                    <input
+                      type="date"
+                      value={cooModalDate}
+                      onChange={(e) => setCooModalDate(e.target.value)}
+                      className="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded-lg text-xs font-medium focus:ring-1 focus:ring-blue-500 focus:outline-none"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="font-semibold text-slate-700 block mb-1">Vehicle Number</label>
+                    <input
+                      type="text"
+                      value={cooModalVehicle}
+                      onChange={(e) => setCooModalVehicle(e.target.value.toUpperCase())}
+                      placeholder="e.g. T 123 ABC"
+                      className="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded-lg text-xs font-mono font-medium focus:ring-1 focus:ring-blue-500 focus:outline-none"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="font-semibold text-slate-700 block mb-1">Driver Name</label>
+                    <input
+                      type="text"
+                      value={cooModalDriver}
+                      onChange={(e) => setCooModalDriver(e.target.value)}
+                      placeholder="e.g. Juma Ally"
+                      className="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded-lg text-xs font-medium focus:ring-1 focus:ring-blue-500 focus:outline-none"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="font-semibold text-slate-700 block mb-1">Destination / Location</label>
+                    <input
+                      type="text"
+                      value={cooModalDestination}
+                      onChange={(e) => setCooModalDestination(e.target.value)}
+                      placeholder="e.g. Mine Site Depot"
+                      className="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded-lg text-xs font-medium focus:ring-1 focus:ring-blue-500 focus:outline-none"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="font-semibold text-slate-700 block mb-1">Delivery Notes / Remarks</label>
+                  <input
+                    type="text"
+                    value={cooModalNotes}
+                    onChange={(e) => setCooModalNotes(e.target.value)}
+                    placeholder="e.g. [Call of Order] Urgent stock requested by site manager pending formal PO release"
+                    className="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded-lg text-xs font-medium focus:ring-1 focus:ring-blue-500 focus:outline-none"
+                  />
+                </div>
+              </div>
+
+              {/* Line Items Entry Table */}
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h4 className="font-bold text-slate-800 text-xs uppercase tracking-wide flex items-center gap-1.5">
+                      <Package className="w-4 h-4 text-blue-600" />
+                      Dispatched Item Lines (Manual Entry)
+                    </h4>
+                    <p className="text-[11px] text-slate-500">
+                      Add the physical items and quantities dispatched on this delivery note.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleAddCooModalLine}
+                    className="px-3 py-1.5 bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 rounded-lg text-xs font-bold inline-flex items-center gap-1 cursor-pointer transition-colors shadow-xs"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    Add Item Line
+                  </button>
+                </div>
+
+                <div className="border border-slate-200 rounded-xl overflow-hidden shadow-xs">
+                  <table className="w-full text-left text-xs border-collapse">
+                    <thead className="bg-slate-100 text-slate-700 font-bold uppercase text-[10px] border-b border-slate-200">
+                      <tr>
+                        <th className="py-2 px-2.5 w-8 text-center">#</th>
+                        <th className="py-2 px-2.5 min-w-[220px]">
+                          Item Name / Description <span className="text-red-500">*</span>
+                        </th>
+                        <th className="py-2 px-2.5 w-28">
+                          Delivered Qty <span className="text-red-500">*</span>
+                        </th>
+                        <th className="py-2 px-2.5 w-24">UOM</th>
+                        <th className="py-2 px-2.5 w-28">Est. Unit Price</th>
+                        <th className="py-2 px-2.5">Line Comment</th>
+                        <th className="py-2 px-2.5 w-10 text-center"></th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100 bg-white">
+                      {cooModalLines.map((line, idx) => (
+                        <tr key={line.id || idx} className="hover:bg-slate-50/70">
+                          <td className="py-2 px-2.5 text-center text-slate-400 font-mono font-bold">
+                            {idx + 1}
+                          </td>
+                          <td className="py-2 px-2.5">
+                            <input
+                              type="text"
+                              value={line.itemDescription}
+                              onChange={(e) => handleUpdateCooModalLine(idx, 'itemDescription', e.target.value)}
+                              placeholder="e.g. White Refined Sugar 50kg Bags"
+                              className="w-full px-2.5 py-1 bg-white border border-slate-300 rounded-md text-xs font-medium focus:ring-1 focus:ring-blue-500 focus:outline-none"
+                            />
+                          </td>
+                          <td className="py-2 px-2.5">
+                            <input
+                              type="number"
+                              min="0"
+                              step="any"
+                              value={line.deliveredQuantity || ''}
+                              onChange={(e) =>
+                                handleUpdateCooModalLine(idx, 'deliveredQuantity', parseFloat(e.target.value) || 0)
+                              }
+                              placeholder="0"
+                              className="w-full px-2.5 py-1 bg-white border border-slate-300 rounded-md text-xs font-mono font-bold text-slate-900 focus:ring-1 focus:ring-blue-500 focus:outline-none"
+                            />
+                          </td>
+                          <td className="py-2 px-2.5">
+                            <select
+                              value={line.unitOfMeasure}
+                              onChange={(e) => handleUpdateCooModalLine(idx, 'unitOfMeasure', e.target.value)}
+                              className="w-full px-2 py-1 bg-white border border-slate-300 rounded-md text-xs font-medium focus:ring-1 focus:ring-blue-500 focus:outline-none"
+                            >
+                              <option value="PCS">PCS</option>
+                              <option value="BAGS">BAGS</option>
+                              <option value="KGS">KGS</option>
+                              <option value="CTNS">CTNS</option>
+                              <option value="PKTS">PKTS</option>
+                              <option value="BUNDLES">BUNDLES</option>
+                              <option value="MT">MT</option>
+                              <option value="LITRES">LITRES</option>
+                            </select>
+                          </td>
+                          <td className="py-2 px-2.5">
+                            <input
+                              type="number"
+                              min="0"
+                              step="any"
+                              value={line.unitPrice || ''}
+                              onChange={(e) =>
+                                handleUpdateCooModalLine(idx, 'unitPrice', parseFloat(e.target.value) || 0)
+                              }
+                              placeholder="0"
+                              className="w-full px-2 py-1 bg-white border border-slate-300 rounded-md text-xs font-mono text-slate-700 focus:ring-1 focus:ring-blue-500 focus:outline-none"
+                            />
+                          </td>
+                          <td className="py-2 px-2.5">
+                            <input
+                              type="text"
+                              value={line.comment}
+                              onChange={(e) => handleUpdateCooModalLine(idx, 'comment', e.target.value)}
+                              placeholder="[Call of Order]"
+                              className="w-full px-2 py-1 bg-white border border-slate-300 rounded-md text-xs font-medium focus:ring-1 focus:ring-blue-500 focus:outline-none"
+                            />
+                          </td>
+                          <td className="py-2 px-2.5 text-center">
+                            {cooModalLines.length > 1 && (
+                              <button
+                                type="button"
+                                onClick={() => handleRemoveCooModalLine(idx)}
+                                className="p-1 text-slate-400 hover:text-rose-600 rounded cursor-pointer transition-colors"
+                                title="Remove item line"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+
+                <div className="flex items-center justify-between p-3 bg-blue-50/60 border border-blue-100 rounded-xl text-xs">
+                  <div className="flex items-center gap-2 text-blue-900 font-medium">
+                    <ShieldAlert className="w-4 h-4 text-blue-600 shrink-0" />
+                    <span>
+                      Saving will log this note under issue category <strong>[Call of Order]</strong> in the Issue Resolution Hub without affecting PO balances until linked.
+                    </span>
+                  </div>
+                  <div className="text-right font-mono font-bold text-slate-800 shrink-0">
+                    Total Delivered Qty:{' '}
+                    <span className="text-blue-700 text-sm">
+                      {cooModalLines
+                        .reduce((acc, l) => acc + (Number(l.deliveredQuantity) || 0), 0)
+                        .toLocaleString()}
+                    </span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Modal Footer */}
+            <div className="px-5 py-3 bg-slate-50 border-t border-slate-200 flex items-center justify-between shrink-0">
+              <button
+                type="button"
+                onClick={() => setIsCooEditModalOpen(false)}
+                className="px-4 py-2 border border-slate-300 hover:bg-slate-100 text-slate-700 rounded-lg text-xs font-bold transition-colors cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleSaveCallOfOrderModal}
+                className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold inline-flex items-center gap-1.5 transition-colors cursor-pointer shadow-sm"
+              >
+                <Save className="w-4 h-4" />
+                Save Call of Order Items
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================================= */}
+      {/* MODAL: LINK CALL OF ORDER TO PURCHASE ORDER                               */}
+      {/* ========================================================================= */}
+      {isCooLinkModalOpen && cooLinkingDN && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs z-50 flex items-center justify-center p-3 sm:p-4">
+          <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 w-full max-w-3xl max-h-[90vh] flex flex-col overflow-hidden animate-in fade-in duration-150">
+            {/* Modal Header */}
+            <div className="px-5 py-3.5 bg-slate-900 text-white flex items-center justify-between shrink-0">
+              <div className="flex items-center gap-3">
+                <div className="p-2 bg-emerald-500/20 text-emerald-400 rounded-lg border border-emerald-500/30">
+                  <Link2 className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="font-bold text-sm sm:text-base flex items-center gap-2">
+                    Link Call of Order to Purchase Order
+                    <span className="font-mono text-emerald-300 text-xs px-2 py-0.5 rounded bg-emerald-500/20 border border-emerald-500/30">
+                      {cooLinkingDN.deliveryNoteNumber}
+                    </span>
+                  </h3>
+                  <p className="text-xs text-slate-400">
+                    Customer: <span className="text-white font-semibold">{cooLinkingDN.customerName}</span>
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsCooLinkModalOpen(false)}
+                className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-colors cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Modal Body */}
+            <div className="p-5 overflow-y-auto space-y-4 text-xs">
+              {cooLinkError && (
+                <div className="p-3 bg-red-50 border border-red-300 rounded-xl text-red-700 flex items-center gap-2 text-xs font-semibold">
+                  <AlertCircle className="w-4 h-4 shrink-0 text-red-500" />
+                  <span>{cooLinkError}</span>
+                </div>
+              )}
+
+              {/* PO Selection */}
+              <div className="bg-slate-50 p-4 rounded-xl border border-slate-200 space-y-3">
+                <h4 className="font-bold text-slate-800 text-xs uppercase tracking-wide">
+                  Select Target Purchase Order
+                </h4>
+                <div>
+                  <label className="font-semibold text-slate-700 block mb-1">
+                    Available Purchase Orders for {cooLinkingDN.customerName}
+                  </label>
+                  <select
+                    value={cooSelectedPoNumber}
+                    onChange={(e) => {
+                      const newPo = e.target.value;
+                      setCooSelectedPoNumber(newPo);
+                      const poObj = poGroups.find((g) => g.poNumber === newPo);
+                      const lines = poObj?.lines || [];
+                      const mappings: Record<string, string> = {};
+                      (cooLinkingDN.lines || []).forEach((l) => {
+                        const desc = (l.itemDescription || '').toLowerCase().trim();
+                        const found = lines.find((pl) => pl.itemDescription.toLowerCase().trim() === desc);
+                        if (found) {
+                          mappings[l.id] = found.id;
+                        } else if (lines.length === 1) {
+                          mappings[l.id] = lines[0].id;
+                        }
+                      });
+                      setCooLineMappings(mappings);
+                    }}
+                    className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-xs font-mono font-bold text-blue-700 focus:ring-1 focus:ring-blue-500 focus:outline-none"
+                  >
+                    <option value="">-- Choose Purchase Order --</option>
+                    {poGroups
+                      .filter((g) => g.customerName === cooLinkingDN.customerName)
+                      .map((po) => (
+                        <option key={po.poNumber} value={po.poNumber}>
+                          {po.poNumber} — {po.lines.length} Line Items ({po.destination || 'Main'}, Date: {po.date || 'N/A'})
+                        </option>
+                      ))}
+                  </select>
+                </div>
+              </div>
+
+              {/* Line Items Mapping */}
+              {cooSelectedPoNumber && (
+                <div className="space-y-2">
+                  <div>
+                    <h4 className="font-bold text-slate-800 text-xs uppercase tracking-wide flex items-center gap-1.5">
+                      <Link2 className="w-4 h-4 text-emerald-600" />
+                      Map Call of Order Lines to PO Line Items
+                    </h4>
+                    <p className="text-[11px] text-slate-500">
+                      Assign each dispatched line to the official PO line item to update pricing and balances.
+                    </p>
+                  </div>
+
+                  <div className="border border-slate-200 rounded-xl overflow-hidden shadow-xs">
+                    <table className="w-full text-left text-xs border-collapse">
+                      <thead className="bg-slate-100 text-slate-700 font-bold uppercase text-[10px] border-b border-slate-200">
+                        <tr>
+                          <th className="py-2 px-3">Call of Order Manual Item</th>
+                          <th className="py-2 px-3 w-32 text-right">Delivered Qty</th>
+                          <th className="py-2 px-3 min-w-[240px]">Map to PO Line Item</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100 bg-white">
+                        {(cooLinkingDN.lines || []).map((l, idx) => {
+                          const poObj = poGroups.find((g) => g.poNumber === cooSelectedPoNumber);
+                          const poLinesList = poObj?.lines || [];
+
+                          const lineKey = l.id || l.poLineId || `line-${idx}`;
+
+                          return (
+                            <tr key={lineKey} className="hover:bg-slate-50">
+                              <td className="py-2.5 px-3">
+                                <span className="font-semibold text-slate-900">{l.itemDescription}</span>
+                              </td>
+                              <td className="py-2.5 px-3 text-right font-mono font-bold text-blue-700">
+                                {l.deliveredQuantity} {l.unitOfMeasure || 'PCS'}
+                              </td>
+                              <td className="py-2.5 px-3">
+                                <select
+                                  value={cooLineMappings[lineKey] || ''}
+                                  onChange={(e) =>
+                                    setCooLineMappings((prev) => ({
+                                      ...prev,
+                                      [lineKey]: e.target.value,
+                                    }))
+                                  }
+                                  className="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded-lg text-xs font-medium focus:ring-1 focus:ring-emerald-500 focus:outline-none"
+                                >
+                                  <option value="">-- Select PO Line Item --</option>
+                                  {poLinesList.map((pl) => (
+                                    <option key={pl.id} value={pl.id}>
+                                      {pl.itemDescription} (PO Qty: {pl.orderedQuantity}, Rate: {formatCurrency(pl.unitPrice || 0)})
+                                    </option>
+                                  ))}
+                                </select>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-xl text-xs text-emerald-800 flex items-center gap-2">
+                    <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                    <span>
+                      Linking will convert this note into a standard delivery note with PO line associations, update unit pricing, decrement undelivered PO balances, and resolve the <strong>[Call of Order]</strong> issue.
+                    </span>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Modal Footer */}
+            <div className="px-5 py-3 bg-slate-50 border-t border-slate-200 flex items-center justify-between shrink-0">
+              <button
+                type="button"
+                onClick={() => setIsCooLinkModalOpen(false)}
+                className="px-4 py-2 border border-slate-300 hover:bg-slate-100 text-slate-700 rounded-lg text-xs font-bold transition-colors cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmLinkPo}
+                disabled={!cooSelectedPoNumber}
+                className="px-5 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded-lg text-xs font-bold inline-flex items-center gap-1.5 transition-colors cursor-pointer shadow-sm"
+              >
+                <Link2 className="w-4 h-4" />
+                Confirm &amp; Convert to Standard Delivery Note
+              </button>
+            </div>
           </div>
         </div>
       )}

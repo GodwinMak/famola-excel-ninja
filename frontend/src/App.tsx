@@ -251,7 +251,7 @@ export default function App() {
 
   // MySQL is now the single source of truth, so this simply replaces local state
   // with whatever the server returns — no more 3-way merge/tombstone logic
-  // (that existed only to reconcile the old JSON-file stores).
+  // (that existed only to reconcile the old JSON-file/Supabase/Sheets stores).
   // Staleness is guarded upstream in fetchFullDatabaseGuarded (see dataGenerationRef)
   // rather than here, since comparing server updatedAt timestamps against a
   // client-stamped "last write" time is vulnerable to clock skew: the client's
@@ -491,7 +491,7 @@ export default function App() {
     source?: string;
   }) => {
     // `users`/`seriesConfig`/`deletedIds`/`source` were only meaningful under the old
-    // JSON-file merge design; MySQL's per-entity tables (and the users/sync +
+    // JSON-file/Supabase merge design; MySQL's per-entity tables (and the users/sync +
     // series-config routes) now own that state, so only the entity arrays below are
     // forwarded to the backend's bulk-sync endpoint.
     //
@@ -868,7 +868,7 @@ export default function App() {
       pendingToast = ['warning', `Invoice "${invoiceToSave.invoiceNumber}" saved and flagged in Issue Resolution Hub.`];
     }
 
-    // Persist all data silently in the background to Server Database without blocking UI
+    // Persist all data silently in the background to Server Database and Google Sheets without blocking UI
     // Non-replace upsert, so only the touched rows need to go: sending the whole
     // invoices/issues tables made bulk-sync rewrite every record (and every invoice
     // line) per save and time out client-side.
@@ -1671,7 +1671,7 @@ export default function App() {
 
       await recalculateAllInvoiceTotalsOnServer();
 
-      // Push recalculated values to server master database
+      // Push recalculated values to server master database and Supabase
       await syncToMasterDatabase({
         invoices: recalculatedInvoices,
         deliveryNotes: recalculatedDNs,
@@ -1728,81 +1728,155 @@ export default function App() {
       setIssues(updatedIssuesList);
       saveIssues(updatedIssuesList);
       pendingToast = ['info', `Delivery Note "${newDN.deliveryNoteNumber}" saved as ${newDN.status || 'Cancelled/OFR'} (excluded from Issue screen).`];
-    } else if (isFlagged) {
+    } else if (isFlagged || newDN.status === 'CALL_OF_ORDER' || newDN.isCallOfOrder) {
+      const isCallOfOrder =
+        newDN.status === 'CALL_OF_ORDER' ||
+        Boolean(newDN.isCallOfOrder) ||
+        (newDN.issueComment && newDN.issueComment.toLowerCase().includes('call of order')) ||
+        (newDN.notes && newDN.notes.toLowerCase().includes('call of order')) ||
+        (newDN.comment && newDN.comment.toLowerCase().includes('call of order'));
+
       const existingIssue = (issues || []).find(
         (i) => i.entityId === newDN.id || (newDN.deliveryNoteNumber && i.referenceNumber?.trim().toLowerCase() === newDN.deliveryNoteNumber.trim().toLowerCase())
       );
 
-      const isCallOfOrderStr = (s?: string) => s && (s.toLowerCase().includes('call of order') || s === '[call of order]');
+      const issueId = existingIssue?.id || newDN.issueId || `issue-dn-${Date.now()}`;
 
-      const lineIssuesList: LineItemIssue[] = (newDN.lines || [])
-        .filter((l) => l.hasIssue)
-        .map((l) => ({
-          lineId: l.poLineId,
-          itemDescription: l.itemDescription,
-          unitOfMeasure: l.unitOfMeasure,
-          poQuantity: l.poQuantity,
-          billedOrDeliveredQuantity: l.deliveredQuantity,
-          unitPrice: l.unitPrice,
-          valueAfterVat: l.valueAfterVat,
-          issueComment: (l.issueComment && !isCallOfOrderStr(l.issueComment)) ? l.issueComment : (l.comment && !isCallOfOrderStr(l.comment) && l.comment.toLowerCase() !== 'okay') ? l.comment : 'Discrepancy on delivered line item',
+      if (isCallOfOrder) {
+        const lineIssuesList: LineItemIssue[] = (newDN.lines || []).map((l, idx) => ({
+          lineId: l.poLineId || (l as any).id || `coo-line-${idx}`,
+          itemDescription: l.itemDescription || 'Call of Order Line Item',
+          unitOfMeasure: l.unitOfMeasure || 'UNIT',
+          poQuantity: l.poQuantity || 0,
+          billedOrDeliveredQuantity: l.deliveredQuantity || 0,
+          quantityDelivered: l.deliveredQuantity || 0,
+          discrepancyQuantity: l.deliveredQuantity || 0,
+          unitPrice: l.unitPrice || 0,
+          valueAfterVat: l.valueAfterVat || 0,
+          issueComment: l.issueComment || l.comment || '[Call of Order] Items dispatched pending formal PO',
           workComment: '',
           status: existingIssue?.status || 'PENDING',
         }));
 
-      const issueId = existingIssue?.id || newDN.issueId || `issue-dn-${Date.now()}`;
+        const autoIssue: DocumentIssueRecord = {
+          ...(existingIssue || {}),
+          id: issueId,
+          entityType: 'DELIVERY',
+          entityId: newDN.id,
+          referenceNumber: newDN.deliveryNoteNumber,
+          poNumber: newDN.poNumber || 'N/A (Call of Order)',
+          customerName: newDN.customerName,
+          destination: newDN.destination,
+          contract: newDN.contract,
+          totalValue: newDN.totalDeliveredValue,
+          issueTitle: '[Call of Order] Items Dispatched Pending PO',
+          primaryIssue: '[Call of Order]',
+          issueType: 'Call of Order',
+          severity: existingIssue?.severity || 'MEDIUM',
+          status: existingIssue?.status || 'PENDING',
+          flaggedBy: existingIssue?.flaggedBy || `${currentUser?.name || 'Logistics Officer'} (${currentUser?.role || 'Dispatcher'})`,
+          flaggedAt: existingIssue?.flaggedAt || new Date().toISOString(),
+          headerComment: newDN.comment || newDN.notes || '[Call of Order] Delivery note issued pending Purchase Order linking.',
+          lineIssues: lineIssuesList.length > 0 ? lineIssuesList : (existingIssue?.lineIssues || []),
+          comments: existingIssue?.comments || [],
+        };
 
-      // Clean Flagged Reason: Never "Call of Order", never generic
-      const rawReason = 
-        (newDN.issueComment && !isCallOfOrderStr(newDN.issueComment) && newDN.issueComment.trim() !== '' && newDN.issueComment.toLowerCase() !== 'okay')
-          ? newDN.issueComment.trim()
-          : (lineIssuesList.find(l => l.issueComment && !isCallOfOrderStr(l.issueComment) && l.issueComment.trim() !== '' && l.issueComment.toLowerCase() !== 'okay')?.issueComment)
-          || (existingIssue?.primaryIssue && !isCallOfOrderStr(existingIssue.primaryIssue) ? existingIssue.primaryIssue : null)
-          || (existingIssue?.issueType || 'Quantity Discrepancy');
+        updatedIssuesList = addOrUpdateIssue(autoIssue);
+        changedIssue = autoIssue;
+        setIssues(updatedIssuesList);
+        pendingToast = ['info', `Call of Order "${newDN.deliveryNoteNumber}" saved. Updated under issue category [Call of Order].`];
+      } else {
+        const isCallOfOrderStr = (s?: string) => s && (s.toLowerCase().includes('call of order') || s === '[call of order]');
 
-      const cleanReason = (rawReason && !rawReason.startsWith('Issue on ') && !rawReason.startsWith('Delivery Discrepancy on '))
-        ? rawReason
-        : (existingIssue?.issueType || 'Quantity Discrepancy');
+        const lineIssuesList: LineItemIssue[] = (newDN.lines || [])
+          .filter((l) => l.hasIssue)
+          .map((l) => ({
+            lineId: l.poLineId,
+            itemDescription: l.itemDescription,
+            unitOfMeasure: l.unitOfMeasure,
+            poQuantity: l.poQuantity,
+            billedOrDeliveredQuantity: l.deliveredQuantity,
+            unitPrice: l.unitPrice,
+            valueAfterVat: l.valueAfterVat,
+            issueComment: (l.issueComment && !isCallOfOrderStr(l.issueComment)) ? l.issueComment : (l.comment && !isCallOfOrderStr(l.comment) && l.comment.toLowerCase() !== 'okay') ? l.comment : 'Discrepancy on delivered line item',
+            workComment: '',
+            status: existingIssue?.status || 'PENDING',
+          }));
 
-      // Comment from delivery details
-      const deliveryComment = (newDN.comment && !isCallOfOrderStr(newDN.comment) && newDN.comment.trim() !== '' && newDN.comment.toLowerCase() !== 'okay')
-        ? newDN.comment.trim()
-        : (newDN.notes && !isCallOfOrderStr(newDN.notes) && newDN.notes.trim() !== '')
-        ? newDN.notes.trim()
-        : (existingIssue?.headerComment && !isCallOfOrderStr(existingIssue.headerComment) && !existingIssue.headerComment.startsWith('Discrepancy flagged during'))
-        ? existingIssue.headerComment
-        : '';
+        // Clean Flagged Reason: Never "Call of Order", never generic
+        const rawReason = 
+          (newDN.issueComment && !isCallOfOrderStr(newDN.issueComment) && newDN.issueComment.trim() !== '' && newDN.issueComment.toLowerCase() !== 'okay')
+            ? newDN.issueComment.trim()
+            : (lineIssuesList.find(l => l.issueComment && !isCallOfOrderStr(l.issueComment) && l.issueComment.trim() !== '' && l.issueComment.toLowerCase() !== 'okay')?.issueComment)
+            || (existingIssue?.primaryIssue && !isCallOfOrderStr(existingIssue.primaryIssue) ? existingIssue.primaryIssue : null)
+            || (existingIssue?.issueType || 'Quantity Discrepancy');
 
-      const autoIssue: DocumentIssueRecord = {
-        ...(existingIssue || {}),
-        id: issueId,
-        entityType: 'DELIVERY',
-        entityId: newDN.id,
-        referenceNumber: newDN.deliveryNoteNumber,
-        poNumber: newDN.poNumber,
-        customerName: newDN.customerName,
-        destination: newDN.destination,
-        contract: newDN.contract,
-        totalValue: newDN.totalDeliveredValue,
-        issueTitle: cleanReason,
-        primaryIssue: cleanReason,
-        issueType: existingIssue?.issueType || 'Quantity Discrepancy',
-        severity: existingIssue?.severity || 'HIGH',
-        status: existingIssue?.status || 'PENDING',
-        flaggedBy: existingIssue?.flaggedBy || `${currentUser?.name || 'Logistics Officer'} (${currentUser?.role || 'Dispatcher'})`,
-        flaggedAt: existingIssue?.flaggedAt || new Date().toISOString(),
-        headerComment: deliveryComment || cleanReason,
-        lineIssues: lineIssuesList.length > 0 ? lineIssuesList : (existingIssue?.lineIssues || []),
-        comments: existingIssue?.comments || [],
-      };
+        const cleanReason = (rawReason && !rawReason.startsWith('Issue on ') && !rawReason.startsWith('Delivery Discrepancy on '))
+          ? rawReason
+          : (existingIssue?.issueType || 'Quantity Discrepancy');
 
-      updatedIssuesList = addOrUpdateIssue(autoIssue);
-      changedIssue = autoIssue;
-      setIssues(updatedIssuesList);
-      pendingToast = ['info', `Delivery Note "${newDN.deliveryNoteNumber}" saved and automatically added to Issue Resolution Hub.`];
+        // Comment from delivery details
+        const deliveryComment = (newDN.comment && !isCallOfOrderStr(newDN.comment) && newDN.comment.trim() !== '' && newDN.comment.toLowerCase() !== 'okay')
+          ? newDN.comment.trim()
+          : (newDN.notes && !isCallOfOrderStr(newDN.notes) && newDN.notes.trim() !== '')
+          ? newDN.notes.trim()
+          : (existingIssue?.headerComment && !isCallOfOrderStr(existingIssue.headerComment) && !existingIssue.headerComment.startsWith('Discrepancy flagged during'))
+          ? existingIssue.headerComment
+          : '';
+
+        const autoIssue: DocumentIssueRecord = {
+          ...(existingIssue || {}),
+          id: issueId,
+          entityType: 'DELIVERY',
+          entityId: newDN.id,
+          referenceNumber: newDN.deliveryNoteNumber,
+          poNumber: newDN.poNumber,
+          customerName: newDN.customerName,
+          destination: newDN.destination,
+          contract: newDN.contract,
+          totalValue: newDN.totalDeliveredValue,
+          issueTitle: cleanReason,
+          primaryIssue: cleanReason,
+          issueType: existingIssue?.issueType || 'Quantity Discrepancy',
+          severity: existingIssue?.severity || 'HIGH',
+          status: existingIssue?.status || 'PENDING',
+          flaggedBy: existingIssue?.flaggedBy || `${currentUser?.name || 'Logistics Officer'} (${currentUser?.role || 'Dispatcher'})`,
+          flaggedAt: existingIssue?.flaggedAt || new Date().toISOString(),
+          headerComment: deliveryComment || cleanReason,
+          lineIssues: lineIssuesList.length > 0 ? lineIssuesList : (existingIssue?.lineIssues || []),
+          comments: existingIssue?.comments || [],
+        };
+
+        updatedIssuesList = addOrUpdateIssue(autoIssue);
+        changedIssue = autoIssue;
+        setIssues(updatedIssuesList);
+        pendingToast = ['info', `Delivery Note "${newDN.deliveryNoteNumber}" saved and automatically added to Issue Resolution Hub.`];
+      }
+    } else {
+      // If it previously had an active issue (such as [Call of Order]) and is now cleanly linked, mark issue as RESOLVED
+      const existingIssue = (issues || []).find(
+        (i) =>
+          i.entityType === 'DELIVERY' &&
+          i.status !== 'RESOLVED' &&
+          (i.entityId === newDN.id ||
+            (newDN.deliveryNoteNumber &&
+              i.referenceNumber?.trim().toLowerCase() === newDN.deliveryNoteNumber.trim().toLowerCase()))
+      );
+      if (existingIssue) {
+        const resolved = resolveDocumentIssue(
+          existingIssue.id,
+          currentUser ? `${currentUser.name} (${currentUser.role})` : 'System',
+          `Linked from Call of Order to Purchase Order ${newDN.poNumber || ''} and converted to standard delivery note.`
+        );
+        updatedIssuesList = resolved;
+        setIssues(resolved);
+        saveIssues(resolved);
+        changedIssue = resolved.find((i) => i.id === existingIssue.id);
+        pendingToast = ['success', `Delivery Note "${newDN.deliveryNoteNumber}" linked to PO "${newDN.poNumber}". Issue [Call of Order] resolved.`];
+      }
     }
 
-    // Persist all data simultaneously to Server Database
+    // Persist all data simultaneously to Server Database & Google Sheets
     const dnSaved = await syncToMasterDatabase({
       deliveryNotes: [newDN],
       issues: changedIssue ? [changedIssue] : [],
@@ -1888,7 +1962,7 @@ export default function App() {
       showToast('success', `Payment "${newPayment.paymentNumber}" of TZS ${formatCurrency(newPayment.amountPaid)} recorded and allocated.`);
     }
 
-    // Persist all data simultaneously to Server Database
+    // Persist all data simultaneously to Server Database & Google Sheets
     syncToMasterDatabase({
       payments: updatedPayments,
       invoices: updatedInvoices,
