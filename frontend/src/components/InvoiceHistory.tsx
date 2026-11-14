@@ -34,11 +34,13 @@ import {
   Image as ImageIcon,
   Calculator,
   RefreshCw,
+  Sparkles,
 } from 'lucide-react';
 import { ImageAttachmentManager } from './ImageAttachmentManager';
 import { InvoiceDatabaseImportModal } from './InvoiceDatabaseImportModal';
 import { SmsConfirmationModal } from './SmsConfirmationModal';
 import { deleteServerInvoiceLine } from '../utils/databaseService';
+import { CustomerNameLookupPanel } from './CustomerNameLookupPanel';
 
 export const getEffectiveInvoiceTotals = (inv: InvoiceRecord) => {
   const lines = inv.lines || [];
@@ -161,6 +163,7 @@ export const InvoiceHistory: React.FC<InvoiceHistoryProps> = ({
   };
 
   // Restricted Edit Invoice Modal state
+  const [showCustomerLookup, setShowCustomerLookup] = useState<boolean>(false);
   const [editModalInvoice, setEditModalInvoice] = useState<InvoiceRecord | null>(null);
   const [editInvoiceNumber, setEditInvoiceNumber] = useState<string>('');
   const [editInvoiceDate, setEditInvoiceDate] = useState<string>('');
@@ -530,9 +533,9 @@ export const InvoiceHistory: React.FC<InvoiceHistoryProps> = ({
 
   return (
     <div className="space-y-4 pb-12">
-      {/* Sub-navigation Tabs (Create Invoice | Invoice Details) + Action Buttons */}
+      {/* Sub-navigation Tabs (Create Invoice | Invoice Details | Customer Name Lookup) + Action Buttons */}
       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 pb-3">
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           {canCreate && (
             <button
               type="button"
@@ -546,10 +549,28 @@ export const InvoiceHistory: React.FC<InvoiceHistoryProps> = ({
 
           <button
             type="button"
-            className="px-4 py-2 rounded-xl font-bold text-xs flex items-center gap-2 transition-all cursor-pointer bg-blue-600 text-white shadow-sm shadow-blue-500/20"
+            onClick={() => setShowCustomerLookup(false)}
+            className={`px-4 py-2 rounded-xl font-bold text-xs flex items-center gap-2 transition-all cursor-pointer ${
+              !showCustomerLookup
+                ? 'bg-blue-600 text-white shadow-sm shadow-blue-500/20'
+                : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-50'
+            }`}
           >
             <Database className="w-4 h-4" />
             <span>Invoice Details ({invoices.length})</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setShowCustomerLookup(true)}
+            className={`px-4 py-2 rounded-xl font-bold text-xs flex items-center gap-2 transition-all cursor-pointer ${
+              showCustomerLookup
+                ? 'bg-blue-600 text-white shadow-sm shadow-blue-500/20'
+                : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-50'
+            }`}
+          >
+            <Sparkles className="w-4 h-4 text-blue-600" />
+            <span>Customer Name Lookup</span>
           </button>
         </div>
 
@@ -590,6 +611,11 @@ export const InvoiceHistory: React.FC<InvoiceHistoryProps> = ({
           )}
         </div>
       </div>
+
+      {showCustomerLookup ? (
+        <CustomerNameLookupPanel moduleLabel="Invoice Module" />
+      ) : (
+        <>
 
       {/* Summary KPI Cards */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
@@ -1532,6 +1558,8 @@ export const InvoiceHistory: React.FC<InvoiceHistoryProps> = ({
         totalAmount={invoicePendingDelete?.totalAfterVat}
         details="Permanently removes invoice from database. Billed quantities return back to purchase order available balance. Any discrepancies associated with this invoice will be purged."
       />
+        </>
+      )}
     </div>
   );
 };

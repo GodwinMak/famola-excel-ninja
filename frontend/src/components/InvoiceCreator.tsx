@@ -54,6 +54,8 @@ import {
   Database
 } from 'lucide-react';
 import { generateSampleInvoiceExcelTemplate } from '../utils/excelParser';
+import { CustomerNameLookupPanel } from './CustomerNameLookupPanel';
+import { resolveCustomerDisplayName } from '../utils/customerNameRule';
 
 interface InvoiceCreatorProps {
   poGroups?: PurchaseOrderGroup[];
@@ -114,6 +116,7 @@ export const InvoiceCreator: React.FC<InvoiceCreatorProps> = ({
   const handleNavigateToHistory = onNavigateToHistory || onViewInvoicesDatabase || (() => {});
 
   // Customer state
+  const [showCustomerLookup, setShowCustomerLookup] = useState<boolean>(false);
   const [selectedCustomer, setSelectedCustomer] = useState<string>('ALL');
   const [customerSearchQuery, setCustomerSearchQuery] = useState<string>('');
   const [isCustomerDropdownOpen, setIsCustomerDropdownOpen] = useState<boolean>(false);
@@ -892,11 +895,12 @@ export const InvoiceCreator: React.FC<InvoiceCreatorProps> = ({
       return;
     }
 
-    const finalCustomer =
+    const finalCustomer = resolveCustomerDisplayName(
       selectedPoGroup?.customerName?.trim() ||
-      (selectedCustomer !== 'ALL' && selectedCustomer.trim() ? selectedCustomer.trim() : '') ||
-      (customerSearchQuery.trim() ? customerSearchQuery.trim() : '') ||
-      (existingRecord?.customerName ? existingRecord.customerName : 'General Customer');
+        (selectedCustomer !== 'ALL' && selectedCustomer.trim() ? selectedCustomer.trim() : '') ||
+        (customerSearchQuery.trim() ? customerSearchQuery.trim() : '') ||
+        (existingRecord?.customerName ? existingRecord.customerName : 'General Customer')
+    );
 
     const poNumberToSave =
       poSearchInput.trim() ||
@@ -1129,12 +1133,17 @@ export const InvoiceCreator: React.FC<InvoiceCreatorProps> = ({
 
   return (
     <div className="space-y-4">
-      {/* Sub-navigation Tabs (Create Invoice | Invoice Details) */}
+      {/* Sub-navigation Tabs (Create Invoice | Invoice Details | Customer Name Lookup) */}
       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 pb-3">
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <button
             type="button"
-            className="px-4 py-2 rounded-xl font-bold text-xs flex items-center gap-2 transition-all cursor-pointer bg-blue-600 text-white shadow-sm shadow-blue-500/20"
+            onClick={() => setShowCustomerLookup(false)}
+            className={`px-4 py-2 rounded-xl font-bold text-xs flex items-center gap-2 transition-all cursor-pointer ${
+              !showCustomerLookup
+                ? 'bg-blue-600 text-white shadow-sm shadow-blue-500/20'
+                : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-50'
+            }`}
           >
             <Receipt className="w-4 h-4" />
             <span>Create Invoice</span>
@@ -1147,6 +1156,19 @@ export const InvoiceCreator: React.FC<InvoiceCreatorProps> = ({
           >
             <Database className="w-4 h-4 text-blue-600" />
             <span>Invoice Details ({invoices.length})</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setShowCustomerLookup(true)}
+            className={`px-4 py-2 rounded-xl font-bold text-xs flex items-center gap-2 transition-all cursor-pointer ${
+              showCustomerLookup
+                ? 'bg-blue-600 text-white shadow-sm shadow-blue-500/20'
+                : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-50'
+            }`}
+          >
+            <Sparkles className="w-4 h-4 text-blue-600" />
+            <span>Customer Name Lookup</span>
           </button>
         </div>
 
@@ -1162,6 +1184,11 @@ export const InvoiceCreator: React.FC<InvoiceCreatorProps> = ({
           </button>
         </div>
       </div>
+
+      {showCustomerLookup ? (
+        <CustomerNameLookupPanel moduleLabel="Invoice Module" />
+      ) : (
+        <>
 
       {/* Saved Invoice Status Banner */}
       {successSavedInvoice && (
@@ -1273,6 +1300,11 @@ export const InvoiceCreator: React.FC<InvoiceCreatorProps> = ({
                   onChange={(e) => {
                     setCustomerSearchQuery(e.target.value);
                     setIsCustomerDropdownOpen(true);
+                  }}
+                  onBlur={() => {
+                    if (customerSearchQuery.trim()) {
+                      setCustomerSearchQuery((prev) => resolveCustomerDisplayName(prev));
+                    }
                   }}
                   onFocus={() => setIsCustomerDropdownOpen(true)}
                   placeholder="Select / search customer..."
@@ -2011,7 +2043,8 @@ export const InvoiceCreator: React.FC<InvoiceCreatorProps> = ({
                   type="text"
                   value={newCustName}
                   onChange={(e) => setNewCustName(e.target.value)}
-                  placeholder="e.g. Geita Gold Mining Ltd"
+                  onBlur={() => setNewCustName((prev) => resolveCustomerDisplayName(prev))}
+                  placeholder="e.g. LINDI or DODOMA"
                   className="w-full px-2.5 py-1.5 border rounded-lg text-xs focus:ring-1 focus:ring-blue-500 focus:outline-none font-medium"
                 />
               </div>
@@ -2073,6 +2106,8 @@ export const InvoiceCreator: React.FC<InvoiceCreatorProps> = ({
         customerName={selectedCustomer !== 'ALL' ? selectedCustomer : undefined}
         warningNote="⚠️ This action will permanently remove this item line from this invoice and recalculate totals."
       />
+        </>
+      )}
     </div>
   );
 };

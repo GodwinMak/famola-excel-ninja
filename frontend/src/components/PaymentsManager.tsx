@@ -47,6 +47,8 @@ import { canDeleteData } from '../utils/authService';
 import { naturalCompare } from '../utils/naturalSort';
 import { PermanentDeleteModal } from './PermanentDeleteModal';
 import { getEffectiveInvoiceTotals } from './InvoiceHistory';
+import { CustomerNameLookupPanel } from './CustomerNameLookupPanel';
+import { resolveCustomerDisplayName } from '../utils/customerNameRule';
 
 interface PaymentsManagerProps {
   payments?: PaymentRecord[];
@@ -590,7 +592,7 @@ export const PaymentsManager: React.FC<PaymentsManagerProps> = ({
   onDeletePayment,
   currentUser,
 }) => {
-  const [viewMode, setViewMode] = useState<'record' | 'ledger' | 'advance'>('record');
+  const [viewMode, setViewMode] = useState<'record' | 'ledger' | 'advance' | 'customer_lookup'>('record');
 
   // =========================================================================
   // BATCH PAYMENT HEADER FIELDS (User Request: ID, Batch No, Ref, Total, Date)
@@ -1534,8 +1536,25 @@ export const PaymentsManager: React.FC<PaymentsManagerProps> = ({
               </span>
             )}
           </button>
+
+          <button
+            type="button"
+            onClick={() => setViewMode('customer_lookup')}
+            className={`px-4 py-2 rounded-xl text-xs font-bold inline-flex items-center gap-2 transition-all cursor-pointer ${
+              viewMode === 'customer_lookup'
+                ? 'bg-blue-600 text-white shadow-sm shadow-blue-500/20'
+                : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-50'
+            }`}
+          >
+            <Sparkles className="w-4 h-4 text-blue-600" />
+            <span>Customer Name Lookup</span>
+          </button>
         </div>
       </div>
+
+      {viewMode === 'customer_lookup' && (
+        <CustomerNameLookupPanel moduleLabel="Payments Module" />
+      )}
 
       {/* TOP KPI CARDS */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">

@@ -38,6 +38,8 @@ import { naturalCompare } from '../utils/naturalSort';
 import { PermanentDeleteModal } from './PermanentDeleteModal';
 import { BatchDeletePOsModal } from './BatchDeletePOsModal';
 import { TablePagination } from './TablePagination';
+import { CustomerNameLookupPanel } from './CustomerNameLookupPanel';
+import { resolveCustomerDisplayName } from '../utils/customerNameRule';
 
 interface POManagerProps {
   poLines: POLineItem[];
@@ -113,6 +115,7 @@ export const POManager: React.FC<POManagerProps> = ({
   const [isClearAllPOsModalOpen, setIsClearAllPOsModalOpen] = useState(false);
   const [selectedPoNumbers, setSelectedPoNumbers] = useState<Set<string>>(new Set());
   const [isBatchDeleteModalOpen, setIsBatchDeleteModalOpen] = useState(false);
+  const [poSubTab, setPoSubTab] = useState<'PO_MASTER' | 'CUSTOMER_LOOKUP'>('PO_MASTER');
 
   const [searchTerm, setSearchTerm] = useState(initialSearchTerm || '');
   const [debouncedSearchTerm, setDebouncedSearchTerm] = useState(initialSearchTerm || '');
@@ -483,7 +486,7 @@ export const POManager: React.FC<POManagerProps> = ({
   const handleSavePODetails = () => {
     if (!onEditPODetails) return;
     onEditPODetails(editingPoNumber, {
-      customerName: editDetailsCustomer.trim(),
+      customerName: resolveCustomerDisplayName(editDetailsCustomer.trim()),
       destination: editDetailsDestination.trim(),
       contract: editDetailsContract.trim(),
       date: editDetailsDate,
@@ -600,7 +603,7 @@ export const POManager: React.FC<POManagerProps> = ({
       return {
         id: `POLINE-${Date.now()}-${idx}`,
         poNumber: newPoNumber.trim(),
-        customerName: newCustomerName.trim(),
+        customerName: resolveCustomerDisplayName(newCustomerName.trim()),
         destination: newDestination.trim() || 'Head Office',
         contract: newContract.trim() || 'General Supply',
         date: newDate,
@@ -781,45 +784,60 @@ export const POManager: React.FC<POManagerProps> = ({
 
   return (
     <div className="space-y-6 pb-12">
-      {/* Top Title Banner */}
-      <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 text-white shadow-md flex flex-col md:flex-row md:items-center justify-between gap-4">
-        <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-xl bg-blue-600/30 text-blue-400 border border-blue-500/30 flex items-center justify-center font-bold">
-            <Layers className="w-5 h-5" />
-          </div>
-          <div>
-            <div className="flex items-center gap-2">
-              <h1 className="text-2xl font-black tracking-tight">PO</h1>
-              <span className="text-xs px-2.5 py-0.5 rounded-full bg-blue-500/20 text-blue-300 font-semibold border border-blue-500/30">
-                Purchase Orders Master
-              </span>
-            </div>
-            <p className="text-slate-400 text-xs mt-0.5">
-              Grouped by PO Number with line item drill-down, contract values, quantities, and invoice tracking.
-            </p>
-          </div>
+      {/* Unified Purchase Order Sub-Navigation Tab Bar */}
+      <div className="bg-white rounded-2xl border border-slate-200 shadow-xs p-2.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+        <div className="flex flex-wrap items-center gap-1.5 bg-slate-100 p-1 rounded-xl border border-slate-200/80">
+          <button
+            type="button"
+            onClick={() => setPoSubTab('PO_MASTER')}
+            className={`px-4 py-2 rounded-lg text-xs font-extrabold inline-flex items-center gap-2 transition-all cursor-pointer ${
+              poSubTab === 'PO_MASTER'
+                ? 'bg-blue-600 text-white shadow-xs'
+                : 'text-slate-600 hover:text-slate-900 hover:bg-white/70'
+            }`}
+          >
+            <Layers className="w-3.5 h-3.5" />
+            Purchase Order Master ({filteredGroups.length})
+          </button>
+          <button
+            type="button"
+            onClick={() => setPoSubTab('CUSTOMER_LOOKUP')}
+            className={`px-4 py-2 rounded-lg text-xs font-extrabold inline-flex items-center gap-2 transition-all cursor-pointer ${
+              poSubTab === 'CUSTOMER_LOOKUP'
+                ? 'bg-blue-600 text-white shadow-xs'
+                : 'text-slate-600 hover:text-slate-900 hover:bg-white/70'
+            }`}
+          >
+            <Sparkles className="w-3.5 h-3.5" />
+            Customer Name Lookup &amp; Matching
+          </button>
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
           <button
             type="button"
             onClick={onDownloadTemplate}
-            className="px-3.5 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-lg text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer transition-colors"
+            className="px-3.5 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-200 rounded-xl text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer transition-colors"
             title="Download Excel PO template to upload into system"
           >
-            <Download className="w-3.5 h-3.5 text-blue-400" />
+            <Download className="w-3.5 h-3.5 text-blue-600" />
             Download Template
           </button>
           <button
             type="button"
             onClick={() => fileInputRef.current?.click()}
-            className="px-3.5 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-xs font-bold shadow-sm inline-flex items-center gap-1.5 cursor-pointer transition-colors"
+            className="px-3.5 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-bold shadow-xs inline-flex items-center gap-1.5 cursor-pointer transition-colors"
           >
             <Upload className="w-3.5 h-3.5" />
             Upload PO Excel
           </button>
         </div>
       </div>
+
+      {poSubTab === 'CUSTOMER_LOOKUP' ? (
+        <CustomerNameLookupPanel moduleLabel="Purchase Order Module" />
+      ) : (
+        <>
 
       {/* Excel Upload Area */}
       <div
@@ -2161,7 +2179,8 @@ export const POManager: React.FC<POManagerProps> = ({
                   type="text"
                   value={newCustomerName}
                   onChange={(e) => setNewCustomerName(e.target.value)}
-                  placeholder="e.g. CRU Mining Ltd or GRB Mining"
+                  onBlur={() => setNewCustomerName((prev) => resolveCustomerDisplayName(prev))}
+                  placeholder="e.g. LINDI or DODOMA"
                   className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg font-medium focus:outline-none focus:border-blue-500"
                 />
               </div>
@@ -2328,6 +2347,7 @@ export const POManager: React.FC<POManagerProps> = ({
                   type="text"
                   value={editDetailsCustomer}
                   onChange={(e) => setEditDetailsCustomer(e.target.value)}
+                  onBlur={() => setEditDetailsCustomer((prev) => resolveCustomerDisplayName(prev))}
                   className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg font-medium focus:outline-none focus:border-blue-500"
                 />
               </div>
@@ -2822,6 +2842,8 @@ export const POManager: React.FC<POManagerProps> = ({
         }}
         selectedPoGroups={selectedPoGroups}
       />
+        </>
+      )}
     </div>
   );
 };

@@ -52,9 +52,26 @@ router.get('/:id', requireScreen('issue_tracking', 'view'), async (req, res) => 
   res.json({ success: true, data: serialize(row) });
 });
 
+const VALID_ISSUE_TYPES = new Set([
+  'Quantity Discrepancy',
+  'Pricing / Rate Error',
+  'Missing Delivery Ref',
+  'VAT / Calculation Error',
+  'Wrong PO Reference',
+  'Damaged / Rejected Goods',
+  'Payment Mismatch',
+  'Customer Query',
+  'Other',
+]);
+
 router.post('/', requireScreen('issue_tracking', 'edit'), async (req, res) => {
   const body = req.body || {};
   const id = body.id || `issue-${Date.now()}`;
+  const normalizedIssueType = VALID_ISSUE_TYPES.has(body.issueType)
+    ? body.issueType
+    : body.entityType === 'PAYMENT'
+    ? 'Payment Mismatch'
+    : 'Other';
 
   const created = await sequelize.transaction(async (t) => {
     const issue = await DocumentIssue.create(
@@ -70,8 +87,8 @@ router.post('/', requireScreen('issue_tracking', 'edit'), async (req, res) => {
         totalValue: body.totalValue || 0,
         disputedAmount: body.disputedAmount || 0,
         issueTitle: body.issueTitle,
-        primaryIssue: body.primaryIssue,
-        issueType: body.issueType,
+        primaryIssue: body.primaryIssue || body.issueType,
+        issueType: normalizedIssueType,
         severity: body.severity,
         status: body.status || 'PENDING',
         flaggedBy: body.flaggedBy,

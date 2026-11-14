@@ -498,6 +498,18 @@ async function bulkUpsertPayments(payments: any[], t: any) {
   }
 }
 
+const VALID_ISSUE_TYPES = new Set([
+  'Quantity Discrepancy',
+  'Pricing / Rate Error',
+  'Missing Delivery Ref',
+  'VAT / Calculation Error',
+  'Wrong PO Reference',
+  'Damaged / Rejected Goods',
+  'Payment Mismatch',
+  'Customer Query',
+  'Other',
+]);
+
 async function bulkUpsertIssues(issues: any[], t: any) {
   if (!issues.length) return;
   const rows = issues.map((issue: any) => ({
@@ -512,8 +524,12 @@ async function bulkUpsertIssues(issues: any[], t: any) {
     totalValue: issue.totalValue || 0,
     disputedAmount: issue.disputedAmount || 0,
     issueTitle: issue.issueTitle,
-    primaryIssue: issue.primaryIssue,
-    issueType: issue.issueType,
+    primaryIssue: issue.primaryIssue || issue.issueType,
+    issueType: VALID_ISSUE_TYPES.has(issue.issueType)
+      ? issue.issueType
+      : issue.entityType === 'PAYMENT'
+      ? 'Payment Mismatch'
+      : 'Other',
     severity: issue.severity,
     status: issue.status || 'PENDING',
     flaggedBy: issue.flaggedBy,

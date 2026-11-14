@@ -101,6 +101,12 @@ import {
   deleteServerIssue,
   recalculateAllInvoiceTotalsOnServer,
 } from './utils/databaseService';
+import {
+  CustomerNameRuleConfig,
+  CUSTOMER_NAME_RULES_EVENT,
+  loadCustomerNameRules,
+  resolveCustomerDisplayName,
+} from './utils/customerNameRule';
 import { CheckCircle2, AlertCircle, X, AlertTriangle, ShieldAlert, FileSpreadsheet, Lock } from 'lucide-react';
 
 // Maps each screen to a real, bookmarkable/deep-linkable URL. Keeping this as the
@@ -666,30 +672,73 @@ export default function App() {
   const isSessionValid = Boolean(isAuthenticated);
   const isAuthRequired = !isAuthenticated;
 
-  // Strict multi-company data isolation: filter records to the active entity
+  // Display-level Customer Name Normalization & Lookup Rules (does not mutate database records)
+  const [customerNameRules, setCustomerNameRules] = useState<CustomerNameRuleConfig>(() =>
+    loadCustomerNameRules()
+  );
+
+  useEffect(() => {
+    const handleRuleChange = () => {
+      setCustomerNameRules(loadCustomerNameRules());
+    };
+    window.addEventListener(CUSTOMER_NAME_RULES_EVENT, handleRuleChange);
+    return () => window.removeEventListener(CUSTOMER_NAME_RULES_EVENT, handleRuleChange);
+  }, []);
+
+  // Strict multi-company data isolation + Display & Matching Customer Name Rule
   const scopedPOLines = useMemo(
-    () => (poLines || []).filter((p) => (p.entityId || 'volex') === currentEntityId),
-    [poLines, currentEntityId]
+    () =>
+      (poLines || [])
+        .filter((p) => (p.entityId || 'volex') === currentEntityId)
+        .map((p) => ({
+          ...p,
+          customerName: resolveCustomerDisplayName(p.customerName, customerNameRules),
+        })),
+    [poLines, currentEntityId, customerNameRules]
   );
 
   const scopedInvoices = useMemo(
-    () => (invoices || []).filter((i) => (i.entityId || 'volex') === currentEntityId),
-    [invoices, currentEntityId]
+    () =>
+      (invoices || [])
+        .filter((i) => (i.entityId || 'volex') === currentEntityId)
+        .map((i) => ({
+          ...i,
+          customerName: resolveCustomerDisplayName(i.customerName, customerNameRules),
+        })),
+    [invoices, currentEntityId, customerNameRules]
   );
 
   const scopedDeliveryNotes = useMemo(
-    () => (deliveryNotes || []).filter((d) => (d.entityId || 'volex') === currentEntityId),
-    [deliveryNotes, currentEntityId]
+    () =>
+      (deliveryNotes || [])
+        .filter((d) => (d.entityId || 'volex') === currentEntityId)
+        .map((d) => ({
+          ...d,
+          customerName: resolveCustomerDisplayName(d.customerName, customerNameRules),
+        })),
+    [deliveryNotes, currentEntityId, customerNameRules]
   );
 
   const scopedPayments = useMemo(
-    () => (payments || []).filter((p) => (p.entityId || 'volex') === currentEntityId),
-    [payments, currentEntityId]
+    () =>
+      (payments || [])
+        .filter((p) => (p.entityId || 'volex') === currentEntityId)
+        .map((p) => ({
+          ...p,
+          customerName: resolveCustomerDisplayName(p.customerName, customerNameRules),
+        })),
+    [payments, currentEntityId, customerNameRules]
   );
 
   const scopedIssues = useMemo(
-    () => (issues || []).filter((iss) => (iss.companyId || 'volex') === currentEntityId),
-    [issues, currentEntityId]
+    () =>
+      (issues || [])
+        .filter((iss) => (iss.companyId || 'volex') === currentEntityId)
+        .map((iss) => ({
+          ...iss,
+          customerName: resolveCustomerDisplayName(iss.customerName, customerNameRules),
+        })),
+    [issues, currentEntityId, customerNameRules]
   );
 
   const pendingIssuesCount = useMemo(() => {
@@ -2271,7 +2320,8 @@ export default function App() {
         issueTitle: hasUnallocatedOrAdvance
           ? `Advance / Unallocated Payment on ${paymentToSave.paymentNumber} (${paymentToSave.customerName})`
           : `Payment Discrepancy on ${paymentToSave.paymentNumber} (${paymentToSave.customerName})`,
-        issueType: hasUnallocatedOrAdvance ? 'Advance / Unallocated Payment' : 'Payment Mismatch',
+        primaryIssue: hasUnallocatedOrAdvance ? 'Advance / Unallocated Payment' : 'Payment Mismatch',
+        issueType: 'Payment Mismatch',
         severity: 'HIGH',
         status: 'PENDING',
         flaggedBy: `${currentUser?.name || 'Finance Officer'} (${currentUser?.role || 'Finance'})`,

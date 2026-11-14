@@ -79,6 +79,8 @@ import { DeliveryDatabaseImportModal } from './DeliveryDatabaseImportModal';
 import { naturalCompare } from '../utils/naturalSort';
 import { PermanentDeleteModal } from './PermanentDeleteModal';
 import { SmsConfirmationModal } from './SmsConfirmationModal';
+import { CustomerNameLookupPanel } from './CustomerNameLookupPanel';
+import { resolveCustomerDisplayName } from '../utils/customerNameRule';
 
 /**
  * Universal comment color coding helper for delivery notes
@@ -583,7 +585,7 @@ export const DeliveryNotesManager: React.FC<DeliveryNotesManagerProps> = ({
   const isAdmin = isAdminUser(currentUser);
   const canLoadDB = canLoadDatabase(currentUser);
   const [isImportModalOpen, setIsImportModalOpen] = useState<boolean>(false);
-  const [internalMode, setInternalMode] = useState<'create' | 'database' | 'call_of_order'>(screenMode || 'create');
+  const [internalMode, setInternalMode] = useState<'create' | 'database' | 'call_of_order' | 'customer_lookup'>(screenMode || 'create');
 
   useEffect(() => {
     if (screenMode) {
@@ -593,9 +595,9 @@ export const DeliveryNotesManager: React.FC<DeliveryNotesManagerProps> = ({
 
   const viewMode = internalMode;
 
-  const handleSwitchMode = (newMode: 'create' | 'database' | 'call_of_order') => {
+  const handleSwitchMode = (newMode: 'create' | 'database' | 'call_of_order' | 'customer_lookup') => {
     setInternalMode(newMode);
-    if (newMode !== 'call_of_order') {
+    if (newMode === 'create' || newMode === 'database') {
       if (onNavigateScreen) {
         onNavigateScreen(newMode);
       } else if (newMode === 'database' && onViewDeliveryDetails) {
@@ -1736,7 +1738,9 @@ export const DeliveryNotesManager: React.FC<DeliveryNotesManagerProps> = ({
       }
     }
 
-    const customerName = selectedPoGroup?.customerName || (selectedCustomer !== 'ALL' ? selectedCustomer : 'General Customer');
+    const customerName = resolveCustomerDisplayName(
+      selectedPoGroup?.customerName || (selectedCustomer !== 'ALL' ? selectedCustomer : 'General Customer')
+    );
 
     const totalDeliveredQuantity = selectedLines.reduce(
       (acc, l) => acc + (Number(l.deliveredQuantity) || 0),
@@ -2971,6 +2975,17 @@ export const DeliveryNotesManager: React.FC<DeliveryNotesManagerProps> = ({
             <Package className="w-4 h-4" />
             Call of Order ({callOfOrderDNs.length})
           </button>
+          <button
+            onClick={() => handleSwitchMode('customer_lookup')}
+            className={`px-4 py-2 rounded-xl font-bold text-xs flex items-center gap-2 transition-all cursor-pointer ${
+              viewMode === 'customer_lookup'
+                ? 'bg-blue-600 text-white shadow-sm shadow-blue-500/20'
+                : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-50'
+            }`}
+          >
+            <Sparkles className="w-4 h-4 text-blue-600" />
+            Customer Name Lookup
+          </button>
         </div>
 
         <div className="flex items-center gap-2">
@@ -3035,6 +3050,10 @@ export const DeliveryNotesManager: React.FC<DeliveryNotesManagerProps> = ({
           )}
         </div>
       </div>
+
+      {viewMode === 'customer_lookup' && (
+        <CustomerNameLookupPanel moduleLabel="Delivery Module" />
+      )}
 
       {viewMode === 'create' && (
         <div className="space-y-6">
@@ -3194,6 +3213,11 @@ export const DeliveryNotesManager: React.FC<DeliveryNotesManagerProps> = ({
                       onChange={(e) => {
                         setCustomerSearchQuery(e.target.value);
                         setIsCustomerDropdownOpen(true);
+                      }}
+                      onBlur={() => {
+                        if (customerSearchQuery.trim()) {
+                          setCustomerSearchQuery((prev) => resolveCustomerDisplayName(prev));
+                        }
                       }}
                       onFocus={() => setIsCustomerDropdownOpen(true)}
                       placeholder="Select / search customer..."
