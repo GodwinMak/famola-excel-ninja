@@ -1,0 +1,41 @@
+# This app is served from its own domain root and uses React Router's
+# BrowserRouter (client-side routing) — a direct visit or refresh on a route
+# like /invoices needs the server to still serve index.html so React can take
+# over, otherwise Apache 404s on paths that aren't real files on disk.
+<IfModule mod_rewrite.c>
+  RewriteEngine On
+  RewriteBase /
+
+  # Real files/directories (the hashed JS/CSS/image assets Vite builds) are
+  # served as-is — only fall through to index.html for everything else.
+  RewriteCond %{REQUEST_FILENAME} -f [OR]
+  RewriteCond %{REQUEST_FILENAME} -d
+  RewriteRule ^ - [L]
+
+  RewriteRule ^ index.html [L]
+</IfModule>
+
+# Vite fingerprints JS/CSS/image filenames with a content hash, so they're
+# safe to cache indefinitely — a code change ships under a new filename.
+# index.html itself must never be cached, or visitors keep getting an old
+# build that points at yesterday's (now-deleted) hashed asset filenames.
+<IfModule mod_expires.c>
+  ExpiresActive On
+  ExpiresByType text/html "access plus 0 seconds"
+  ExpiresByType application/javascript "access plus 1 year"
+  ExpiresByType text/css "access plus 1 year"
+  ExpiresByType image/png "access plus 1 year"
+  ExpiresByType image/jpeg "access plus 1 year"
+  ExpiresByType image/svg+xml "access plus 1 year"
+  ExpiresByType font/woff2 "access plus 1 year"
+</IfModule>
+
+<IfModule mod_headers.c>
+  <FilesMatch "\.html$">
+    Header set Cache-Control "no-cache, no-store, must-revalidate"
+  </FilesMatch>
+</IfModule>
+
+<IfModule mod_deflate.c>
+  AddOutputFilterByType DEFLATE text/html text/css application/javascript application/json image/svg+xml
+</IfModule>

@@ -1,0 +1,14 @@
+node_modules
+dist
+build
+.aistudio
+.env
+.env.*
+!.env.example
+*.log
+.DS_Store
+coverage
+data/attachments/*
+!data/attachments/.gitkeep
+bun.lock
+metadata.json
